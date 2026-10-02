@@ -5,6 +5,10 @@
 #include <larm/hal/IdealBackend.h>
 #include <larm/sim/Simulation.h>
 
+#ifdef LARM_HAS_ROBSTRIDE
+#include <larm/drivers/robstride/Backend.h>
+#endif
+
 #include <gtest/gtest.h>
 
 #include <cerrno>
@@ -67,7 +71,9 @@ JointVector clearancePose() {
     return q;
 }
 
-struct NoAllocation : testing::TestWithParam<bool> {
+enum class BackendKind : std::uint8_t { Ideal, MuJoCo, RobStride };
+
+struct NoAllocation : testing::TestWithParam<BackendKind> {
     void SetUp() override {
         auto const *const path = std::getenv("LARM_ROBOT_PROFILE");
         ASSERT_NE(path, nullptr);
@@ -77,15 +83,27 @@ struct NoAllocation : testing::TestWithParam<bool> {
         auto robot = model::loadRobotModel(profile);
         ASSERT_TRUE(robot) << robot.error().message;
         robotModel = std::move(*robot);
-        if (GetParam()) {
+        switch (GetParam()) {
+        case BackendKind::Ideal:
+            backend =
+                hal::makeIdealBackend({.initialPosition = clearancePose(), .period = profile.controlPeriod});
+            break;
+        case BackendKind::MuJoCo: {
             auto made = sim::makeSimulation(profile, {});
             ASSERT_TRUE(made) << made.error().message;
             (*made)->reset(clearancePose());
             backend = std::move(*made);
-        } else {
-            backend =
-                hal::makeIdealBackend({.initialPosition = clearancePose(), .period = profile.controlPeriod});
+            break;
         }
+        case BackendKind::RobStride:
+            makeRobStrideBackend();
+            break;
+        }
+        if (IsSkipped()) {
+            return;
+        }
+        ASSERT_TRUE(backend);
+        ASSERT_TRUE(backend->driver().connect());
         channels = std::make_unique<control::RuntimeChannels>(profile.dof());
         auto made = control::makeControlCycle(
             profile, {.driver = &backend->driver(), .model = robotModel.get(), .channels = channels.get()});
@@ -133,6 +151,32 @@ struct NoAllocation : testing::TestWithParam<bool> {
         });
     }
 
+    // Simulated RobStride motors at the clearance pose, carrying the arm's gravity.
+    void makeRobStrideBackend() {
+#ifdef LARM_HAS_ROBSTRIDE
+        auto const config = drivers::robstride::parseDriverConfig(profile);
+        ASSERT_TRUE(config) << config.error().message;
+        auto start = std::vector<double>{};
+        for (auto const &actuator : config->actuators) {
+            start.push_back((clearancePose()[idx(actuator.joint)] - actuator.transmission.offset) /
+                            actuator.transmission.scale);
+        }
+        auto const dynamics = std::shared_ptr<model::Dynamics>{robotModel->makeDynamics()};
+        auto made = drivers::robstride::makeSimulatedRobStrideBackend(
+            profile, {.load = drivers::robstride::jointSpaceLoad(
+                          *config,
+                          [dynamics](JointVector const &position, JointVector &torque) {
+                              dynamics->gravity(position, torque);
+                              torque *= -1.0;
+                          }),
+                      .position = start});
+        ASSERT_TRUE(made) << made.error().message;
+        backend = std::move(*made);
+#else
+        GTEST_SKIP() << "built without the RobStride driver";
+#endif
+    }
+
     RobotProfile profile;
     std::unique_ptr<model::RobotModel> robotModel;
     std::unique_ptr<hal::Backend> backend;
@@ -174,9 +218,18 @@ TEST(AllocationCounter, SeesHeapAllocations) {
     EXPECT_GT(allocations, 0u);
 }
 
-INSTANTIATE_TEST_SUITE_P(Backends, NoAllocation, testing::Values(false, true),
-                         [](testing::TestParamInfo<bool> const &backendParam) {
-                             return backendParam.param ? "MuJoCo" : "Ideal";
+INSTANTIATE_TEST_SUITE_P(Backends, NoAllocation,
+                         testing::Values(BackendKind::Ideal, BackendKind::MuJoCo, BackendKind::RobStride),
+                         [](testing::TestParamInfo<BackendKind> const &backendParam) {
+                             switch (backendParam.param) {
+                             case BackendKind::Ideal:
+                                 return "Ideal";
+                             case BackendKind::MuJoCo:
+                                 return "MuJoCo";
+                             case BackendKind::RobStride:
+                                 return "RobStride";
+                             }
+                             return "Unknown";
                          });
 
 } // namespace

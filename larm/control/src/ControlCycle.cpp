@@ -15,7 +15,8 @@ template <class... Handlers> struct Overloaded : Handlers... {
 };
 template <class... Handlers> Overloaded(Handlers...) -> Overloaded<Handlers...>;
 
-enum class PowerPhase : std::uint8_t { Off, Ramping, On };
+// Degraded: some actuators dropped out while power was requested; the rest hold until disabled.
+enum class PowerPhase : std::uint8_t { Off, Ramping, On, Degraded };
 
 struct Slot {
     GoalId goal;
@@ -110,9 +111,11 @@ struct ControlCycleImpl final : ControlCycle {
     }
 
     void updatePower() noexcept {
-        auto const actuatorsOn =
-            std::all_of(state.actuators.begin(), state.actuators.begin() + static_cast<long>(dof),
-                        [](ActuatorStatus const &actuator) { return actuator.enabled; });
+        auto const first = state.actuators.begin();
+        auto const last = first + static_cast<long>(dof);
+        auto const isOn = [](ActuatorStatus const &actuator) { return actuator.enabled; };
+        auto const actuatorsOn = std::all_of(first, last, isOn);
+        auto const anyOn = std::any_of(first, last, isOn);
         switch (phase) {
         case PowerPhase::Off:
             if (actuatorsOn and state.isFresh and requestedPower == hal::DrivePower::Enabled) {
@@ -122,28 +125,34 @@ struct ControlCycleImpl final : ControlCycle {
             }
             break;
         case PowerPhase::Ramping:
+        case PowerPhase::On:
             if (not actuatorsOn) {
-                powerOff();
-            } else if (state.stamp - rampStart >= enableRamp) {
+                loseActuators(anyOn);
+            } else if (phase == PowerPhase::Ramping and state.stamp - rampStart >= enableRamp) {
                 phase = PowerPhase::On;
                 emit(PowerChanged{.power = hal::DrivePower::Enabled});
             }
             break;
-        case PowerPhase::On:
-            if (not actuatorsOn) {
-                if (requestedPower == hal::DrivePower::Enabled) {
-                    raiseFault(FaultCode::ActuatorFault);
-                }
-                abortAll(ControlStatus::Stopped, FaultCode::NotEnabled);
-                powerOff();
+        case PowerPhase::Degraded:
+            if (not anyOn) {
+                phase = PowerPhase::Off;
             }
             break;
         }
     }
 
-    void powerOff() noexcept {
-        phase = PowerPhase::Off;
-        emit(PowerChanged{.power = hal::DrivePower::Disabled});
+    // An actuator that drops out unasked is a fault; the others keep holding where the arm is.
+    void loseActuators(bool const anyOn) noexcept {
+        auto const wasOn = phase == PowerPhase::On;
+        auto const unasked = requestedPower == hal::DrivePower::Enabled;
+        if (unasked) {
+            raiseFault(FaultCode::ActuatorFault);
+        }
+        abortAll(ControlStatus::Stopped, FaultCode::NotEnabled);
+        phase = unasked and anyOn ? PowerPhase::Degraded : PowerPhase::Off;
+        if (wasOn) {
+            emit(PowerChanged{.power = hal::DrivePower::Disabled});
+        }
     }
 
     void drainRequests() noexcept {
@@ -429,8 +438,15 @@ Expected<std::unique_ptr<ControlCycle>> makeControlCycle(RobotProfile const &pro
     if (deps.driver == nullptr or deps.model == nullptr or deps.channels == nullptr) {
         return makeError(ErrorCode::InvalidArgument, "control cycle needs a driver, a model and channels");
     }
-    if (not deps.driver->capabilities().supports(hal::CommandMode::Impedance)) {
+    auto const capabilities = deps.driver->capabilities();
+    if (not capabilities.supports(hal::CommandMode::Impedance)) {
         return makeError(ErrorCode::Unsupported, "the driver does not accept impedance commands");
+    }
+    if (profile.controlPeriod < capabilities.minPeriod) {
+        return makeError(ErrorCode::InvalidConfig,
+                         "the control period of " + std::to_string(toSeconds(profile.controlPeriod) * 1e3) +
+                             " ms is shorter than the driver's minimum of " +
+                             std::to_string(toSeconds(capabilities.minPeriod) * 1e3) + " ms");
     }
     if (deps.model->dof() != profile.dof()) {
         return makeError(ErrorCode::InvalidArgument, "the model and the profile disagree on the joint count");

@@ -52,10 +52,15 @@ safety:
 sim:
   physics_step_us: 500
 
+# 电机零点与 URDF 零点一致、方向相同（reBotArm_control_py 2026-07-17 重力标定记录）。
 driver:
   type: robstride_socketcan
   interface: can0
   host_id: 0xFD
+  # connect 时关闭电机主动上报（只写内存，不保存）。
+  disable_active_report: true
+  # 不设置时不改动电机侧 CAN 超时。该机械臂无抱闸，超时后电机进入复位模式，机械臂会落下。
+  # can_timeout_ms: 200
   actuators:
     - {joint: joint1, id: 0x01, model: rs-06}
     - {joint: joint2, id: 0x02, model: rs-06}
@@ -63,4 +68,5 @@ driver:
     - {joint: joint4, id: 0x04, model: rs-00}
     - {joint: joint5, id: 0x05, model: rs-00}
     - {joint: joint6, id: 0x06, model: rs-00}
-    - {joint: gripper, id: 0x07, model: rs-00}
+    # 小齿轮齿条：7.353 mm/rad（reBot-Isaacsim 夹爪实测）。方向与零点待真机标定。
+    - {joint: gripper, id: 0x07, model: rs-00, transmission: {scale: 0.007353, offset: 0.0}}

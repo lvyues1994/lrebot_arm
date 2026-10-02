@@ -474,13 +474,16 @@ CO2_END
 
 ### 6.4 larm_hal
 
-- 职责：5.2 中的接口；`MonotonicTimeline`（`clock_nanosleep` 绝对时刻，记录错过的周期）；`IdealBackend`（关节每周期精确到达指令位置，可注入反馈丢失），用于控制层测试；第 4 步加入 `TransmissionTable`（方向、零点偏置、线性比例，覆盖夹爪的弧度 ↔ 米）与传动适配器。
-- 验证：`MonotonicTimeline` 与 `IdealBackend` 的单元测试；传动换算加入后补充其单元测试（含刚度、阻尼在比例下的换算）。
+- 职责：5.2 中的接口；`MonotonicTimeline`（`clock_nanosleep` 绝对时刻，记录错过的周期）；`IdealBackend`（关节每周期精确到达指令位置，可注入反馈丢失），用于控制层测试。
+- 传动（方向、零点偏置、线性比例，含夹爪的弧度 ↔ 米）没有做成 HAL 层的通用表，而是作为每个执行器的驱动配置，由驱动在收发时换算（6.7）。目前只有 RobStride 驱动需要它，等有第二个驱动时再上提。
+- 验证：`MonotonicTimeline` 与 `IdealBackend` 的单元测试；传动换算的测试在驱动里（含刚度、阻尼按比例平方换算）。
 
 ### 6.5 larm_control
 
 - 职责：5.3、5.4 中的控制器、安全层、`ControlCycle`；`RealtimeRunner`（RAII：构造时建线程并设置调度策略、绑核、锁内存，析构时停止并 join，统计唤醒延迟和超时周期）。
 - 每周期的模型缓存：`ModelCache` 在每周期用当前 `q` 更新一次（FK、工具帧雅可比、重力力矩），控制器与安全层共用。
+- 执行器掉线（第 4 步加入）：已使能时某个执行器自行退出运行（电机故障等），控制周期报 `ActuatorFault`、中止所有目标，其余执行器以完整保持刚度加重力补偿停在当前位置（Degraded 阶段，对外报告为未使能），直到请求失能。机械臂没有抱闸，这比让其余关节一起松掉更安全。恢复步骤：失能（不在停放姿态时用强制失能）→ 复位故障 → 重新使能；重新使能时驱动先清除电机锁存的故障。
+- `makeControlCycle` 拒绝短于驱动 `minPeriod` 的控制周期，`minPeriod` 由驱动按总线流量给出。
 - 验证：在 `IdealBackend` 和 MuJoCo 后端上的确定性测试：轨迹跟踪误差在界内、限位与限幅生效、取消时平滑减速、故障锁存与复位、控制器占用冲突被拒绝；替换 `malloc` 的测试保证运行中的控制周期不做堆分配。
 
 ### 6.6 larm_sim
@@ -494,17 +497,42 @@ CO2_END
 - 随机化 `Randomizer`：在 reset 时扰动质量与质心、关节摩擦、增益、延迟、传感器噪声；默认范围参考重力标定结果（质量 ±10%，库仑摩擦 0.2–0.5 N·m）。
 - 风险：显式计算的阻尼项 kd 在小惯量腕关节上可能要求更小的物理步长。需要按最小等效惯量验证稳定性；不稳定时改用 MuJoCo 执行器 + `implicitfast` 积分器隐式处理阻尼。
 
-### 6.7 larm_driver_robstride
+### 6.7 larm_can 与 larm_robstride（第 4 步，离线部分已实现）
 
-- 职责：通过 SocketCAN 直接驱动 RobStride 电机的 `RobotDriver`。
-- 结构：
-  - `RobStrideCodec`：帧编解码（运控、反馈、使能、失能、参数读写、故障上报），纯函数。
-  - `CanSocket`：RAII 套接字，非阻塞收发，批量发送。
-  - `RobStrideBus`：实时侧状态机。`write()` 发出本周期全部运控帧；`read()` 非阻塞排空接收队列，用上一周期指令的应答更新状态；使能、失能序列分布在若干周期内完成。
-  - 速度估计：反馈中的速度与位置差分在调试期做对比，按结果决定使用哪一个，必要时做滤波。
-- `connect()`：逐个 ping 电机；只读核对参数模板；关闭主动上报；若固件支持，配置电机侧 CAN 超时，让主机崩溃时电机自行进入安全状态。参数不一致时拒绝继续。
-- MotorBridge 不进入运行时路径，继续用于调试期交叉核对和电机初始化。
-- 风险：协议细节以 RobStride 协议手册为准，实现前逐条核对；编解码先用手册样例帧做单元测试。
+- 职责：通过 SocketCAN 直接驱动 RobStride 电机的 `RobotDriver`。分两个目标：`larm_can`（`drivers/can`，与厂商无关）与 `larm_robstride`（`drivers/robstride`）。
+- `CanTransport`：非阻塞批量收发（`sendmmsg` / `recvmmsg`，缓冲预分配，实时线程可调用），错误帧只计数，并记录 bus-off；另有一个用于非实时代码的阻塞等待。`openSocketCan(interface)` 打开原始套接字；错误信息都带接口名。
+- 编解码 `Codec`：纯函数，覆盖私有协议的运控（类型 1）、反馈（类型 2，以及主动上报类型 24）、使能（3）、失能（4，可清故障）、ping（0）、参数读（17）、参数写（18）、故障上报（21）、主动上报开关（24）。数值按手册把 [-max, max] 线性映射到 [0, 65535]，取最近整数。另有电机侧的 `encodeStatus` / `decodeMotion`，供模拟电机与测试使用。核对依据：
+  - RobStride RS-00、RS-06 手册的帧格式。
+  - motorbridge 项目的实现，及其实机抓到的固件版本应答。版本应答与反馈帧类型相同，按负载特征排除。
+  - 量程：RS-00 为 ±4π rad、±33 rad/s、±14 N·m、Kp 0–500、Kd 0–5；RS-06 为 ±4π、±50、±36、0–5000、0–100。RS-06 手册的运控帧表写的是 ±120 N·m、Kp 0–500、Kd 0–5，与同一份手册的反馈帧表（±36 N·m）以及 motorbridge、robstride_ros2 都不一致，判断为抄写错误；实机使能保持阶段要验证前馈力矩的量程。
+  - 旧固件的 Kp/Kd 有 1.4167 倍的换算错误（RobStride 固件更新说明），上真机前用 MotorBridge Studio 确认固件版本。
+- `DriverConfig`：解析配置的 `driver` 段，拒绝未知键，内容包括：
+  - 接口名、主机 ID、执行器列表（关节、CAN ID、型号、传动 `scale` / `offset`）；
+  - 是否关闭主动上报、可选的电机侧 CAN 超时、总线比特率。
+  - 解析时检查：每个关节恰有一个执行器、ID 不重复且不等于主机 ID；关节限位、速度、力矩、刚度、阻尼按传动换算到电机侧后不超出编码量程。
+- `RobStrideDriver`：每个执行器每周期发一帧，并在下次 `read()` 前收到一帧应答。各执行器的状态：
+  - 未使能（Idle）：用参数读（机械位置 0x7019）轮询，不发失能帧。因此另一个程序留在运行状态的电机不会被意外失能，机械臂不会因此落下。
+  - 请求使能的上升沿：有锁存故障的电机先发带清除标志的失能帧，再发使能帧，直到反馈显示运行模式。
+  - 运行中发运控帧（关节量经传动换算）。
+  - 请求失能时发失能帧，直到反馈显示已退出运行，再回到参数读轮询。
+  - 自行退出运行的电机不会自动重新使能，直到下一次请求使能。
+  - `read()` 排空接收队列，按 ID 与目的地址过滤外来帧，缺少应答时反馈标记为不新鲜。
+  - `connect()` 逐个 ping、读 `run_mode`（须为 0）与 `zero_sta`（须为 1，即上电位置落在 -π..π），按配置关闭主动上报、写 CAN 超时；不改变电源状态。`disconnect()` 不发任何帧，电机保持最后一条指令。
+  - `capabilities().minPeriod` 等于一个周期的总线时间：7 个执行器 14 帧，1 Mbit/s 下约 2.17 ms。
+- 后端：`makeRobStrideBackend(profile)` 组合 SocketCAN、驱动与单调时间线；`makeSimulatedRobStrideBackend(profile, options)` 把同一个驱动接到模拟电机上。
+- 模拟电机 `SimulatedMotors`：进程内总线，按 MIT 律积分每个电机，可通过 `jointSpaceLoad` 加上关节空间负载（例如机械臂的重力）。支持注入故障、静默某个电机、改 `run_mode`。构造后不分配内存，带锁，可以一边被控制线程使用、一边被另一线程查看。
+- 速度：先用反馈帧中的速度。探针同时记录参数 0x701B 的速度和位置差分，供实机比对。reBotArm_control_py 记录中说"速度参数不是 rad/s"，而它读的 0x701A 在参数表里是滤波电流，并不是速度。
+- 安全取舍：
+  - 电机侧 CAN 超时默认不写。该机械臂没有抱闸，超时后电机进入复位模式，机械臂会落下；不写时主机崩溃后电机保持最后一条指令。是否启用待真机阶段决定。
+  - 运行时停止时如果仍在使能，电机保持最后一条指令。因此停止运行时之前应先停放、失能。
+- MotorBridge 不进入运行时路径，继续用于电机初始化（ID、零点、固件）与交叉核对。
+- 验证：
+  - 编解码按手册布局逐字节测试，包括实机抓到的版本应答。
+  - 配置解析测试。
+  - 驱动在模拟电机上的测试：connect 检查、失能时只读轮询、使能与跟踪、夹爪传动、故障电机不自动恢复、应答缺失、`minPeriod`。
+  - 带重力负载的整栈运行时测试：使能、运动、夹取、停放、失能；单个执行器故障时其余保持；周期短于总线时间被拒绝。
+  - 零堆分配测试加入 RobStride 后端。
+  - `vcan0` 上的 SocketCAN 收发测试，没有该接口时跳过。
 
 ### 6.8 larm_runtime
 
@@ -633,12 +661,25 @@ struct VectorEnvironment {
 - 启动：
   - `launch/sim.launch.py`：运行时节点 + `robot_state_publisher` + RViz；把 URDF 中的相对网格路径改写为 `file://` URI 供 RViz 使用。
   - `launch/studio.launch.py`：仿真加 Studio，关闭 Studio 即结束整个 launch。
+  - `launch/robot.launch.py`：真机。运行时节点使用 `backend:=robstride`，加 `robot_state_publisher`，使用墙钟，不发布 `/clock`；可选 RViz。`backend:=robstride_simulated` 在不接硬件时演练同一套 launch。
   - `rviz/rebot.rviz`。
-  - 真机 launch 与 MoveIt 配置在对应步骤补充。
+  - MoveIt 配置在需要时补充。
 
-配置文件为 `robots/rebot_b601/config/rebot_b601_rs.yaml`。其中位置与力矩限值取自 URDF，增益取自 reBotArm_control_py；速度、加速度、加加速度限值是保守初值；夹爪的电机到位移换算、夹爪增益和电机侧超时还需要标定或实测。
+配置文件为 `robots/rebot_b601/config/rebot_b601_rs.yaml`。各项来源：
+- 位置与力矩限值取自 URDF；增益取自 reBotArm_control_py；速度、加速度、加加速度限值是保守初值。
+- 驱动段：
+  - 电机 ID 0x01–0x07、型号、主机 ID 0xFD；
+  - 电机零点与 URDF 零点一致、方向相同（reBotArm_control_py 2026-07-17 的重力标定记录）；
+  - 夹爪传动为小齿轮齿条 7.353 mm/rad（reBot-Isaacsim 的夹爪实测），方向与零点待真机标定。
+- 夹爪增益仍是仿真值：2000 N/m 换算到电机约 0.11 N·m/rad。实测静摩擦约 0.1 N·m（指尖约 13.6 N），这个刚度在真机上不够，需要在真机阶段整定。
 
-该机械臂没有抱闸，失能后会在重力下落下。因此：失能只在停放姿态（q=0，夹爪由桌面支撑）执行；故障反应默认是保持而不是失能；主机失联时只能依靠电机侧 CAN 超时，该功能需要在 RobStride 手册中确认，不支持时只剩物理支撑和断电急停。同一框架换成 B601-DM（达妙电机）时，新增一个达妙驱动和一份配置即可，其余不变。
+该机械臂没有抱闸，失能后会在重力下落下。由此有以下规则：
+- 失能只在停放姿态执行（q=0，夹爪由桌面支撑）；
+- 故障反应默认是保持而不是失能；单个执行器掉线时，其余执行器保持（6.5）；
+- 主机失联时，电机保持最后一条指令，除非配置了电机侧 CAN 超时；手册确认支持该超时（参数 0x7028，20000 = 1 s），超时后电机进入复位模式，机械臂会落下；
+- 剩下的手段只有物理支撑和断电急停。
+
+同一框架换成 B601-DM（达妙电机）时，新增一个达妙驱动和一份配置即可，其余不变。
 
 ## 8 工程结构
 
@@ -646,10 +687,10 @@ struct VectorEnvironment {
 lrebot_arm/
   larm/                        # 一个 CMake 工程，同时是 ament 包 larm
     core/ model/ motion/ hal/ control/ sim/ runtime/ ros/ studio/   # 已实现
-    apps/sim_cli/ apps/runtime_node/ apps/studio/                    # 已实现的组合根
+    drivers/can/ drivers/robstride/                                  # 已实现（未上真机）
+    apps/sim_cli/ apps/runtime_node/ apps/studio/ apps/driver_probe/ # 已实现的组合根
     tests/                                                           # 跨模块集成测试
-    drivers/robstride/ learning/ python/
-    apps/                      # 其余组合根：larm_driver_probe
+    learning/ python/
   larm_msgs/                   # rosidl 接口包
   robots/rebot_b601/           # ament 包：config/ launch/ rviz/ scripts/ generated/
   tools/fetch_mujoco.sh
@@ -660,7 +701,7 @@ lrebot_arm/
 - 选择一个 CMake 工程加多个目标，而不是每个模块一个 ament 包：lexec 目前没有安装导出，跨包共享同一个 lexec 提供者很麻烦；单工程内可以在顶层先提供 `lexec::lexec`，再加入 lrclexec、lqtexec 与 co2，保证全程序只有一个提供者。模块边界由目标依赖保证。
 - 仓库根目录不放 CMakeLists.txt：colcon 会把它识别为一个包，不再向下发现 `larm_msgs` 等子包。
 - 模块是 STATIC 库：OBJECT 库的目标文件不会沿依赖链传递到最终链接。
-- 选项：已有 `LARM_WITH_MUJOCO`、`LARM_WITH_ROS`（CMake 预设中关闭，colcon 构建时打开）、`LARM_WITH_STUDIO`（还需要 ROS 与 MuJoCo，且找到 Qt 6 Widgets 与 OpenGL 时才构建，否则只提示跳过；官方 Qt 需要加入 `CMAKE_PREFIX_PATH`）；后续加入 `LARM_WITH_PYTHON`、`LARM_WITH_ONNX`。训练机器可以只构建核心、仿真与训练模块。
+- 选项：已有 `LARM_WITH_MUJOCO`、`LARM_WITH_ROS`（CMake 预设中关闭，colcon 构建时打开）、`LARM_WITH_ROBSTRIDE`（Linux 上默认打开）、`LARM_WITH_STUDIO`（还需要 ROS 与 MuJoCo，且找到 Qt 6 Widgets 与 OpenGL 时才构建，否则只提示跳过；官方 Qt 需要加入 `CMAKE_PREFIX_PATH`）；后续加入 `LARM_WITH_PYTHON`、`LARM_WITH_ONNX`。训练机器可以只构建核心、仿真与训练模块。
 - 外部依赖：lexec、co2、lrclexec、lqtexec 由 FetchContent 按固定提交拉取并标记为 SYSTEM，lrclexec 与 lqtexec 复用顶层提供的 `lexec::lexec`；本地开发可用 `FETCHCONTENT_SOURCE_DIR_<NAME>` 指向本地仓库。Pinocchio 与 Ruckig 来自 ROS 安装目录，构建前需要 source ROS 环境；Pinocchio 的 CMake 配置会探测 numpy，因此预设与 `colcon.meta` 都指定系统 Python。
 - 两条构建路径：`larm/` 下用 CMake 预设开发核心模块（不含 ROS 节点）；仓库根目录用 `colcon build --base-paths larm larm_msgs robots` 构建 ROS 工作区。安装时 MuJoCo 动态库随 larm 一起装进 `lib/`，可执行文件以 `$ORIGIN` 相对 RPATH 找到它。
 - TSan 预设带一份只针对 `libmujoco.so` 的抑制文件：预编译的 MuJoCo 未插桩，其加载模型时的内部线程池会产生误报。
@@ -672,7 +713,15 @@ lrebot_arm/
 
 依赖真实环境的模块用独立的开发入口验证：
 
-- `larm_driver_probe`：真机调试入口。默认只读（扫描、监视状态）；使能保持、单关节小幅运动各需要单独的显式开关；输出 JSONL 便于比对。
+- `larm_driver_probe`：真机调试入口（第 4 步已实现），输出 JSON Lines。各命令：
+  - `scan`（只读）：ping 每个执行器，读 `run_mode`、`zero_sta`、母线电压、位置，并统计主动上报帧。
+  - `monitor SECONDS`（只读）：50 Hz 参数读采样，输出关节位置、速度参数和位置差分。
+  - `hold SECONDS --confirm-power`：在停放姿态使能、保持、失能。
+  - `jog JOINT RADIANS --confirm-motion`：手臂单关节最多 ±0.2 rad，以 20% 速度往返后失能。
+  - `hold` 与 `jog` 走完整的运行时：开始前要求反馈新鲜、无故障、各转动关节距停放姿态不超过 0.1 rad，否则拒绝。
+  - Ctrl+C 中断运动后，探针把机械臂停放并失能；收尾不再被打断，需要紧急停止时用硬件急停。停放失败时保持使能并报告。
+  - 结束时输出驱动与总线统计（应答缺失、外来帧、发送失败、错误帧、bus-off、错过的周期）。
+  - `--simulated` 让任一命令在带重力负载的模拟电机上演练。
 - `larm_sim_cli`：不经 ROS，直接在 MuJoCo 中运行一个场景（轨迹、阶跃、故障注入），输出跟踪误差和计时统计。
 - Studio 脚本模式；ROS `launch_testing`。
 
@@ -685,7 +734,7 @@ lrebot_arm/
 1. **核心与仿真闭环**（已完成）：core、model、motion、hal、control、sim、`larm_sim_cli`。完成标准：在 MuJoCo 中确定性地跑完一条轨迹，各项测试通过，URDF 与 MJCF 一致性测试通过。另有测试保证控制周期运行时不做堆分配。
 2. **运行时与 ROS 2**（已完成）：runtime、msgs、ros。完成标准：仿真后端下 FollowJointTrajectory、MoveToPose、夹爪、急停、抢占通过 ROS 集成测试（进程内经 DDS 驱动节点）；launch 启动后命令行可操作，TF 完整。
 3. **Studio**（已完成）：远程会话、`SceneMirror`、视口，以及会话、关节、笛卡尔、路径、夹爪面板。完成标准：脚本模式走通主要流程。
-4. **真机**：RobStride 驱动，按"只读 → 使能保持 → 单关节小幅运动 → 慢速轨迹"逐级上真机；实测总线负载与周期抖动，确定控制频率。
+4. **真机**：RobStride 驱动，按"只读 → 使能保持 → 单关节小幅运动 → 慢速轨迹"逐级上真机；实测总线负载与周期抖动，确定控制频率。离线部分已完成：驱动、调试探针、真机 launch，以及在模拟电机上的整栈演练。上真机的各级等 PCAN 连接、并经操作者逐级批准后进行（检查清单见 README）。
 5. **示教与模仿学习**：遥操作与拖动示教录制、MCAP → LeRobot 转换、Python 推理节点经流式关节目标部署；先仿真后真机。
 6. **强化学习**：learning 环境、larm_py、示例任务（末端到达），PPO 训练，ONNX 部署到仿真再到真机。
 
@@ -715,4 +764,7 @@ lrebot_arm/
 待定：
 
 - 控制频率：默认 250 Hz，总线实测后确定。
+- 电机侧 CAN 超时：默认不写（主机崩溃时电机保持最后一条指令）；写入则超时后机械臂落下。真机阶段决定。
+- 夹爪：传动的方向与零点、真机增益。
+- 单个执行器掉线时其余保持（已实现）：上真机后确认这一反应是否合适。
 - 框架名称 `larm`。
