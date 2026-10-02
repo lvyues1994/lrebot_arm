@@ -4,7 +4,7 @@
 
 ## 准备
 
-依赖 Ubuntu 24.04、ROS 2 Jazzy（Pinocchio、Ruckig 取自其安装目录）、`libyaml-cpp-dev`、`libexpected-dev`、`libgtest-dev`、`libeigen3-dev`、CMake 3.25+、Ninja。lexec、co2、lrclexec 在配置时按固定提交自动拉取。
+依赖 Ubuntu 24.04、ROS 2 Jazzy（Pinocchio、Ruckig 取自其安装目录）、`libyaml-cpp-dev`、`libexpected-dev`、`libgtest-dev`、`libeigen3-dev`、CMake 3.25+、Ninja。lexec、co2、lrclexec、lqtexec 在配置时按固定提交自动拉取。Studio 另需 Qt 6（Widgets、OpenGL），在 X11 下运行官方 Qt 还需要 `sudo apt install libxcb-cursor0`；找不到 Qt 6 时跳过 Studio，其余照常构建。
 
 ```bash
 tools/fetch_mujoco.sh                                  # MuJoCo 3.8.0 → .deps/
@@ -41,6 +41,7 @@ ctest --preset debug
 
 ```bash
 source /opt/ros/jazzy/setup.bash
+export CMAKE_PREFIX_PATH=$HOME/Qt/6.8.3/gcc_64:$CMAKE_PREFIX_PATH   # 使用官方 Qt 时，用于构建 Studio
 colcon build --base-paths larm larm_msgs robots
 colcon test --base-paths larm larm_msgs robots && colcon test-result --verbose
 source install/setup.bash
@@ -59,3 +60,21 @@ ros2 topic echo /larm_runtime/status
 ```
 
 其余接口：`/larm_runtime/arm/follow_joint_trajectory`（`control_msgs/FollowJointTrajectory`）、`/larm_runtime/arm/move_to_pose`，服务 `disable`、`park`、`reset_fault`、`emergency_stop`。机械臂没有抱闸，`disable` 只在停放姿态下成功，先调用 `park`。
+
+## Studio
+
+仿真加 Studio，关闭 Studio 即结束整个 launch：
+
+```bash
+ros2 launch rebot_b601 studio.launch.py       # rviz:=true 同时开 RViz
+```
+
+也可以连接一个已经在运行的运行时节点：
+
+```bash
+ros2 run larm larm_studio --profile $(ros2 pkg prefix rebot_b601)/share/rebot_b601/config/rebot_b601_rs.yaml
+```
+
+右侧是会话面板（使能、停放、失能、复位、急停）和关节、笛卡尔、路径、夹爪面板；每个面板的"Stop"停止它正在执行的操作。视口左键旋转、右键平移、滚轮缩放，黄色标记是笛卡尔面板的目标位姿。
+
+`--script [--screenshots DIR]` 用真实按钮自动走完主要流程并检查结果（`colcon test` 中的 `larm_studio_script` 默认在 `offscreen` 平台下运行它；设 `QT_QPA_PLATFORM=xcb` 可得到渲染后的截图）。

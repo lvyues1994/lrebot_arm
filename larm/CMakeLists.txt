@@ -10,6 +10,7 @@ option(LARM_WARNINGS_AS_ERRORS "Treat compiler warnings in larm targets as error
 option(LARM_BUILD_TESTS "Build the larm test suite" ${PROJECT_IS_TOP_LEVEL})
 option(LARM_WITH_MUJOCO "Build the MuJoCo simulation backend and its tools" ON)
 option(LARM_WITH_ROS "Build the ROS 2 node; needs a sourced ROS 2 environment with larm_msgs" ON)
+option(LARM_WITH_STUDIO "Build larm studio, with ROS and MuJoCo, when Qt 6 is found" ON)
 set(LARM_MUJOCO_ROOT "" CACHE PATH "Official MuJoCo release directory containing include/ and lib/")
 set(LARM_ROBOT_PROFILE
     "${CMAKE_CURRENT_SOURCE_DIR}/../robots/rebot_b601/config/rebot_b601_rs.yaml"
@@ -46,6 +47,15 @@ if(LARM_WITH_ROS)
     add_subdirectory(ros)
     if(LARM_WITH_MUJOCO)
         add_subdirectory(apps/runtime_node)
+    endif()
+endif()
+if(LARM_WITH_STUDIO AND LARM_WITH_ROS AND LARM_WITH_MUJOCO)
+    find_package(Qt6 6.2 QUIET COMPONENTS Widgets OpenGL)
+    if(Qt6_FOUND)
+        add_subdirectory(studio)
+        add_subdirectory(apps/studio)
+    else()
+        message(STATUS "larm studio skipped: Qt 6 Widgets and OpenGL not found (add Qt to CMAKE_PREFIX_PATH)")
     endif()
 endif()
 

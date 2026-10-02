@@ -1,8 +1,7 @@
 // Drives the runtime node over DDS with ROS clients, against the MuJoCo backend.
+#include "TestServer.h"
+
 #include <larm/model/RobotModel.h>
-#include <larm/ros/RuntimeNode.h>
-#include <larm/runtime/LocalRuntime.h>
-#include <larm/sim/Simulation.h>
 
 #include <control_msgs/action/follow_joint_trajectory.hpp>
 #include <control_msgs/action/gripper_command.hpp>
@@ -40,29 +39,8 @@ std::vector<double> armTarget(double const base) { return {base, 1.0, 1.4, -0.5,
 // One runtime, node and set of clients for the whole suite; tests run in order on the same robot.
 struct World {
     World() {
-        auto const *const path = std::getenv("LARM_ROBOT_PROFILE");
-        auto loaded = loadRobotProfile(path == nullptr ? "" : path);
-        if (not loaded) {
-            throw std::runtime_error{loaded.error().message};
-        }
-        profile = *loaded;
-        auto simulation =
-            sim::makeSimulation(profile, {.pacing = sim::Pacing::RealTime, .realTimeFactor = 4.0});
-        if (not simulation) {
-            throw std::runtime_error{simulation.error().message};
-        }
-        auto start = profile.safety.restPose;
-        start << 0.0, 0.7, 1.1, 0.0, 0.0, 0.0, 0.02;
-        (*simulation)->reset(start);
-        auto started = runtime::startLocalRuntime(profile, std::move(*simulation), {});
-        if (not started) {
-            throw std::runtime_error{started.error().message};
-        }
-        session = std::move(*started);
-
-        serverNode = std::make_shared<rclcpp::Node>("larm_runtime");
-        runtimeNode = makeRuntimeNode(serverNode, *session, scope, {.publishClock = true});
         clientNode = std::make_shared<rclcpp::Node>("larm_test_client");
+        server = std::make_unique<test_support::TestServer>(std::vector{clientNode});
         client = std::make_unique<lrclexec::TimerScheduler>(clientNode);
         follow = rclcpp_action::create_client<FollowJointTrajectory>(
             clientNode, std::string{kServer} + "/arm/follow_joint_trajectory");
@@ -72,9 +50,6 @@ struct World {
             rclcpp_action::create_client<MoveToPose>(clientNode, std::string{kServer} + "/arm/move_to_pose");
         grip = rclcpp_action::create_client<GripperCommand>(clientNode, std::string{kServer} +
                                                                             "/gripper/gripper_command");
-        executor.add_node(serverNode);
-        executor.add_node(clientNode);
-        spinner = std::thread{[this] { lrclexec::spin_with_scope(executor, scope, stop.get_token()); }};
         for (auto const &action : std::vector<rclcpp_action::ClientBase *>{follow.get(), moveJoints.get(),
                                                                            movePose.get(), grip.get()}) {
             if (not action->wait_for_action_server(std::chrono::seconds{10})) {
@@ -84,19 +59,15 @@ struct World {
     }
 
     ~World() {
-        runtimeNode->close();
-        stop.request_stop();
-        spinner.join();
+        server->stop();
         follow.reset();
         moveJoints.reset();
         movePose.reset();
         grip.reset();
         triggers.clear();
-        runtimeNode.reset();
         client.reset();
+        server.reset();
         clientNode.reset();
-        serverNode.reset();
-        session.reset();
     }
 
     std::shared_ptr<Trigger::Response> trigger(std::string const &name) {
@@ -127,21 +98,17 @@ struct World {
         return goal;
     }
 
-    RobotProfile profile;
-    std::unique_ptr<runtime::RobotSession> session;
-    lexec::counting_scope scope;
-    lexec::inplace_stop_source stop;
-    rclcpp::Node::SharedPtr serverNode;
-    std::unique_ptr<RuntimeNode> runtimeNode;
+    RobotProfile const &profile() const { return server->profile; }
+    runtime::RobotSession &session() const { return *server->session; }
+
     rclcpp::Node::SharedPtr clientNode;
+    std::unique_ptr<test_support::TestServer> server;
     std::unique_ptr<lrclexec::TimerScheduler> client;
     rclcpp_action::Client<FollowJointTrajectory>::SharedPtr follow;
     rclcpp_action::Client<MoveToJoints>::SharedPtr moveJoints;
     rclcpp_action::Client<MoveToPose>::SharedPtr movePose;
     rclcpp_action::Client<GripperCommand>::SharedPtr grip;
     std::map<std::string, rclcpp::Client<Trigger>::SharedPtr> triggers;
-    rclcpp::executors::SingleThreadedExecutor executor;
-    std::thread spinner;
 };
 
 struct RuntimeNodeTest : testing::Test {
@@ -194,7 +161,7 @@ TEST_F(RuntimeNodeTest, FollowsAJointTrajectory) {
     auto const result = world->execute(world->follow, goal);
     ASSERT_TRUE(result);
     EXPECT_EQ(std::get<0>(*result)->error_code, FollowJointTrajectory::Result::SUCCESSFUL);
-    EXPECT_NEAR(world->session->latest().state.joints.position[0], 0.5, 0.02);
+    EXPECT_NEAR(world->session().latest().state.joints.position[0], 0.5, 0.02);
 }
 
 TEST_F(RuntimeNodeTest, MovesToJointsInTheGoalsOrder) {
@@ -209,11 +176,11 @@ TEST_F(RuntimeNodeTest, MovesToJointsInTheGoalsOrder) {
 }
 
 TEST_F(RuntimeNodeTest, MovesToAPose) {
-    auto model = model::loadRobotModel(world->profile);
+    auto model = model::loadRobotModel(world->profile());
     ASSERT_TRUE(model);
     auto kinematics = (*model)->makeKinematics();
     auto const tool = *kinematics->findFrame("gripper_end");
-    auto configuration = world->profile.safety.restPose;
+    auto configuration = world->profile().safety.restPose;
     configuration << -0.4, 1.0, 1.4, -0.5, 0.4, 1.0, 0.0;
     kinematics->update(configuration);
     auto const pose = kinematics->framePose(tool);
@@ -228,7 +195,7 @@ TEST_F(RuntimeNodeTest, MovesToAPose) {
     goal.target.pose.orientation.y = pose.rotation.y();
     goal.target.pose.orientation.z = pose.rotation.z();
     ASSERT_TRUE(world->execute(world->movePose, goal));
-    kinematics->update(world->session->latest().state.joints.position);
+    kinematics->update(world->session().latest().state.joints.position);
     EXPECT_LT((kinematics->framePose(tool).translation - pose.translation).norm(), 0.01);
 }
 
@@ -271,7 +238,7 @@ TEST_F(RuntimeNodeTest, CancelStopsTheMotion) {
         lrclexec::execute_action(*world->client, world->moveJoints, world->jointGoal(armTarget(2.0), 0.3)),
         lexec::prop{lexec::get_stop_token, source.get_token()}));
     EXPECT_FALSE(result);
-    EXPECT_LT(world->session->latest().state.joints.position[0], 1.9);
+    EXPECT_LT(world->session().latest().state.joints.position[0], 1.9);
 }
 
 TEST_F(RuntimeNodeTest, EmergencyStopAbortsUntilReset) {

@@ -20,6 +20,7 @@ GroupJoints GroupJoints::of(RobotProfile const &profile, JointGroupSpec const &s
     for (std::size_t i = 0; i < spec.joints.size(); ++i) {
         auto const &joint = profile.joints[spec.joints[i]];
         joints.names.push_back(joint.descriptionJoint);
+        joints.profileIndices.push_back(spec.joints[i]);
         joints.byName[joint.descriptionJoint] = i;
         joints.byName[joint.name] = i;
     }

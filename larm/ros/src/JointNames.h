@@ -14,6 +14,8 @@ namespace larm::ros {
 struct GroupJoints {
     std::string group;
     std::vector<std::string> names;
+    // Profile joint index of each group joint.
+    std::vector<std::size_t> profileIndices;
     std::map<std::string, std::size_t> byName;
 
     static GroupJoints of(RobotProfile const &profile, JointGroupSpec const &spec);

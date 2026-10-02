@@ -16,6 +16,11 @@ set(LEXEC_BUILD_TESTS OFF)
 set(CO2_BUILD_TESTS OFF)
 FetchContent_MakeAvailable(lexec co2)
 
+# larm uses no standard execution policies. Without this, C++20 pulls <execution> and with it TBB
+# into every user of lexec; TBB's headers then clash with Qt's `emit` macro. Set on the target so
+# every consumer, lrclexec and lqtexec included, sees the same lexec.
+target_compile_definitions(lexec INTERFACE LEXEC_NO_STD_EXECUTION_POLICY)
+
 if(LARM_WITH_ROS)
     FetchContent_Declare(lrclexec
         GIT_REPOSITORY https://github.com/lvyues1994/lrclexec.git

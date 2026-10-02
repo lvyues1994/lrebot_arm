@@ -33,7 +33,7 @@
 
 ### 2.2 软件环境（本机）
 
-Ubuntu 24.04、GCC 13.3、ROS 2 Jazzy。Jazzy 软件包：Pinocchio 4.1.0、Coal 3.0.3、Ruckig 0.9.2、ros2_control 4.48、MoveIt 2.12.4、tl-expected。Qt 6.8.3（`~/Qt`）与系统 Qt 5.15.13。MuJoCo 使用官方 3.8.0 发布包，由 `tools/fetch_mujoco.sh` 按固定哈希下载到 `.deps/`（不入库）。ROS 的 `tl_expected` 包已标记弃用，改用系统的 `libexpected-dev`。
+Ubuntu 24.04、GCC 13.3、ROS 2 Jazzy。Jazzy 软件包：Pinocchio 4.1.0、Coal 3.0.3、Ruckig 0.9.2、ros2_control 4.48、MoveIt 2.12.4、tl-expected。Qt 6.8.3（`~/Qt`）与系统 Qt 5.15.13。MuJoCo 使用官方 3.8.0 发布包，由 `tools/fetch_mujoco.sh` 按固定哈希下载到 `.deps/`（不入库）。ROS 的 `tl_expected` 包已标记弃用，改用系统的 `libexpected-dev`。官方 Qt 6.5 起的 xcb 平台插件依赖 `libxcb-cursor0`，本机未安装，在 X11 下运行 Studio 前需要 `sudo apt install libxcb-cursor0`。
 
 ### 2.3 自有库
 
@@ -42,7 +42,7 @@ Ubuntu 24.04、GCC 13.3、ROS 2 Jazzy。Jazzy 软件包：Pinocchio 4.1.0、Coal
 - **lqtexec**：Qt 事件循环作调度器；`wait_signal`、`SignalChannel`；`ObjectScope`（工作随 QObject 生命周期收束）；`ThreadPoolScheduler`；`exec_with_scope`。
 - **co2**：C++14 宏实现的无栈协程，`Task`、`Generator`、`AsyncGenerator`、`stop_token`；经 lexec 桥可直接 `CO2_AWAIT` 一个 sender。
 
-本次验证：lexec + co2 桥在 `-std=c++20` 下编译运行通过；C++20 下 lexec 引入 `<execution>`，需要链接 TBB。lrclexec 与 lqtexec 都接受父工程提供的 `lexec::lexec`，整个程序只能有一个 lexec 提供者。`~/code/lockfree/fastqueue` 是按需分配节点的 MPMC 队列，不满足实时线程零分配的要求，不用于实时边界。
+本次验证：lexec + co2 桥在 `-std=c++20` 下编译运行通过；C++20 下 lexec 默认引入 `<execution>`，随之引入 TBB，而 TBB 头文件与 Qt 的 `emit` 宏冲突。larm 不使用标准执行策略，因此在 `lexec::lexec` 目标上定义 `LEXEC_NO_STD_EXECUTION_POLICY`，所有使用者（包括 lrclexec、lqtexec）看到同一份配置；Studio 另外定义 `QT_NO_KEYWORDS`。lrclexec 与 lqtexec 都接受父工程提供的 `lexec::lexec`，整个程序只能有一个 lexec 提供者。`~/code/lockfree/fastqueue` 是按需分配节点的 MPMC 队列，不满足实时线程零分配的要求，不用于实时边界。
 
 ## 3 设计原则
 
@@ -169,8 +169,8 @@ flowchart LR
 | 库 | 用在哪里 | 做什么 |
 |---|---|---|
 | lexec | Runtime | 运动 API 返回类型擦除的 sender；规划卸载到线程池；`when_any` 做超时；`counting_scope` 管理任务生命周期 |
-| lrclexec | larm_ros | 运行时节点的 Action 服务端（抢占语义）、状态发布循环、`spin_with_scope` + `SignalStop` 收束；Studio 侧的远程会话用 `execute_action` / `call_service` / `wait_message` |
-| lqtexec | larm_studio | ROS 完成结果 `continues_on` 回 GUI 线程；面板操作绑定 `ObjectScope`（面板关闭即停止它发起的运动）；按钮信号用 `SignalChannel`；`exec_with_scope` 收束 |
+| lrclexec | larm_ros | 运行时节点的 Action 服务端（抢占语义）、状态发布循环、`spin_with_scope` + `SignalStop` 收束；Studio 侧的远程会话用 `execute_action` / `call_service`，Studio 的 ROS 线程用 `spin_with_scope` |
+| lqtexec | larm_studio | 面板操作的结果经 `then_on(ObjectScope, …)` 回 GUI 线程；面板持有 `ObjectScope`（面板关闭即停止它发起的运动）；停止按钮用 `wait_signal` 与操作 `when_any` 竞争；`SignalStop` + `exec_with_scope` 收束 |
 | co2 | 任务层 | 多步流程（抓放、标定例程、数据采集）、长循环；`CO2_AWAIT` 运动 API 返回的 sender |
 
 实时线程内不使用其中任何一个。
@@ -489,7 +489,7 @@ CO2_END
 - `MujocoWorld`：持有 `mjModel` 与 `mjData`，按配置把关节名、执行器名绑定到 MuJoCo ID，加载场景物体。不做模型随机化时，多个世界共享同一个只读 `mjModel`；做随机化时每个世界持有自己的模型副本。
 - `ActuatorModel`：把 `JointCommand` 转成关节力矩，在每个物理子步计算 MIT 律、力矩饱和、可选的指令延迟和量化。MJCF 中执行器为力矩型 `motor`。
 - `SimulatedRobot`：实现 `RobotDriver`、`RealtimeIo` 和仿真 `Timeline`。`advance()` 执行一个控制周期内的全部物理子步（默认物理步长 0.5 ms，控制周期 4 ms 时为 8 步），节流策略为"按实时倍率"或"不节流"。失能时力矩为 0，可以在仿真中验证掉臂与安全反应。
-- 场景快照：每帧把整个世界的 `qpos` 写入 `LatestValue`，供 ROS 发布给 Studio。
+- `SceneMirror`（第 3 步实现）：Studio 侧的显示用世界，持有自己的 `mjModel` 与 `mjData`，不做物理。把配置关节的位置写入 `qpos`，按 MJCF 中 `equality joint` 的多项式补出耦合关节（`joint_right`），再 `mj_forward`。机器人姿态由 `/joint_states` 即可还原；整个世界的 `qpos` 快照留到场景中有可动物体时再加入。
 - 相机：离屏渲染（EGL）在独立线程中进行，用自己的 `mjData` 副本。
 - 随机化 `Randomizer`：在 reset 时扰动质量与质心、关节摩擦、增益、延迟、传感器噪声；默认范围参考重力标定结果（质量 ±10%，库仑摩擦 0.2–0.5 N·m）。
 - 风险：显式计算的阻尼项 kd 在小惯量腕关节上可能要求更小的物理步长。需要按最小等效惯量验证稳定性；不稳定时改用 MuJoCo 执行器 + `implicitfast` 积分器隐式处理阻尼。
@@ -518,7 +518,7 @@ CO2_END
 
 ### 6.9 larm_msgs 与 larm_ros
 
-- `larm_msgs`：已有 `ArmStatus`（使能、反馈新鲜度、安全状态、故障、正在运行目标的组、最近一次失败原因）、Action `MoveToJoints`、`MoveToPose`；`SceneState`、`RunPolicy` 随第 3、5 步加入。其余用标准消息。
+- `larm_msgs`：已有 `ArmStatus`（使能、反馈新鲜度、安全状态、故障、正在运行目标的组、最近一次失败原因）、Action `MoveToJoints`、`MoveToPose`；`SceneState` 在场景中有可动物体时加入，`RunPolicy` 随第 5 步加入。其余用标准消息。
 - 运行时节点 `larm_runtime_node`（组合根）：参数 `profile`、`backend`（目前为 `mujoco`）、`real_time_factor`、`start_position`、`rt_priority`。用普通节点加 `~/enable`、`~/disable`、`~/park`、`~/reset_fault`、`~/emergency_stop` 服务表达电源与安全状态，而不是 LifecycleNode：使能要等刚度爬升完成，生命周期回调里不应等待；需要时可以在外面再包一层生命周期。
 - 接口（第 2 步实现了前两行与 Action、服务；其余随后续步骤加入）：
 
@@ -539,19 +539,42 @@ CO2_END
 - Action 服务端用 lrclexec 的 `make_action_server_preempt`，工厂直接返回 `MotionApi` 的 sender。`/joint_states` 使用描述中的关节名（夹爪为 `joint_left`，`joint_right` 由 URDF 的 mimic 推出）；仿真时与 `/clock` 一样以仿真时间打戳。状态发布是一个 co2 协程循环，`CO2_AWAIT` lrclexec 的定时 sender（非 lexec 命名空间的 sender 需经 `lexec::coro::as_awaitable`）。
 - 失败原因：lrclexec 的服务端在 error 时以空 result 中止，因此原因写入节点日志与 `~/status` 的 `last_error`。若希望 Action result 本身带错误码，需要 lrclexec 支持"带 result 的 abort"。
 - 收束：`SignalStop` 触发停止 → 关闭各 Action 服务端 → `spin_with_scope` 排空 scope → 析构节点与会话；遵守 lrclexec 的约束（不在执行器回调中阻塞等待依赖同一执行器的 sender；Action 客户端与服务端活到执行器停止之后）。
-- `RosRobotSession`（`RobotSession` 的远程实现，基于 `execute_action`、`call_service`、`wait_message`）随第 3 步的 Studio 加入。
-- 验证：进程内集成测试经 DDS 驱动节点（11 个场景：关节状态、使能、FollowJointTrajectory、MoveToJoints、MoveToPose、GripperCommand、无效目标、抢占、取消、急停与复位、停放后失能）；另以 launch 启动仿真做命令行冒烟验证与 Ctrl+C 收束验证。
+- 远程会话 `makeRemoteSession(node, profile, options)`（第 3 步实现）：`RobotSession` 的 ROS 实现，Studio 用它操作运行时节点。
+  - 快照由 `/joint_states` 与 `~/status` 的订阅拼成（关节、使能、反馈新鲜度、安全状态、故障、运行中的组）。
+  - 服务用 `call_service`，运动与夹爪用 `execute_action`。服务端尚未发现时立即以 `MotionError` 失败，不会无限等待。停止请求经 lrclexec 取消远端目标。`emergencyStop()` 只发出请求、不等应答。强制失能不对远程开放。
+  - 失败原因：服务端以 `"<原因>: <详情>"` 回报，客户端还原为 `MotionFailure`。Action 中止时不带原因，客户端等待 200 ms（长于状态发布周期），再从 `~/status` 的 `last_error` 读取。
+  - lrclexec 的 `call_service`、`execute_action` 以左值 `exception_ptr` 完成 `set_error`，而声明的签名是 `set_error_t(std::exception_ptr)`，类型擦除的接收者因此不接受。远程会话在末尾用 `let_error(just_error)` 转成右值；这一点应在 lrclexec 中修正。
+- 验证：进程内集成测试经 DDS 驱动节点（11 个场景：关节状态、使能、FollowJointTrajectory、MoveToJoints、MoveToPose、GripperCommand、无效目标、抢占、取消、急停与复位、停放后失能）；远程会话另有 9 个测试，与运行时节点在同一进程内经 DDS 通信，每个测试套件使用独立的 DDS 域；另以 launch 启动仿真做命令行冒烟验证与 Ctrl+C 收束验证。
 
 ### 6.10 larm_studio
 
-- 职责：Qt 6 桌面程序，用于观察、操控、录制。
-- 组合根：`QApplication`、lqtexec `EventLoopContext`、ROS 执行器线程、`RosRobotSession`、场景来源、主窗口。
-- 视口 `MujocoViewport`：`QOpenGLWindow` 经 `QWidget::createWindowContainer` 嵌入，申请兼容配置的 OpenGL 上下文。原因：MuJoCo 3.8 的 `mjFB_WINDOW` 指默认帧缓冲，而 `QOpenGLWidget` 渲染到自己的 FBO。渲染使用视口自己的 `mjData`，叠加层包括目标位姿的"幽灵"机械臂、轨迹折线、坐标系。
-- 场景来源 `SceneSource`：仿真时订阅 `~/sim/scene_state`；真机时由 `/joint_states` 填机器人关节（镜像）；回放时读取录制文件。
-- 面板：会话（使能、停放、急停、状态）、关节（点动滑块、实时值）、笛卡尔（目标位姿、拖动视口中的目标、点动）、轨迹（路点、规划预览、执行）、夹爪、遥测曲线、录制。
-- 每个面板持有 `ObjectScope`，发起的运动随面板关闭而停止；"停止"按钮触发该 operation 的停止请求。
-- 遥操作：键盘、手柄或 SpaceMouse 以 50–100 Hz 发布伺服指令。
-- 验证：脚本模式按日志推进真实界面路径并截图（参照 lqtexec widgets 示例）；视口需要真实 GL 上下文，在 X11 或 Xvfb + Mesa 下运行。
+- 职责：Qt 6 桌面程序，用于观察、操控、录制。它是运行时节点的客户端，只依赖 `RobotSession` 接口；仿真与真机下用法相同。
+- 组合根 `larm_studio`（`apps/studio`）：
+  - 启动顺序：先构造停止源与 lqtexec `SignalStop`，早于任何线程，使所有线程继承屏蔽的信号；然后设置兼容配置的默认 `QSurfaceFormat`，构造 `QApplication`；再加载配置、Pinocchio 模型和 `SceneMirror`；最后创建 ROS 节点 `larm_studio` 与远程会话，ROS 执行器在单独线程中运行 `spin_with_scope`，Qt 主线程运行 `exec_with_scope`。
+  - 命令行参数中的 ROS 参数先剥离，交给 rclcpp。
+  - 收束：关窗、Ctrl+C 或脚本结束都会发出停止请求。各面板正在执行的操作先被停止并排空，远端目标在这一步被取消，所以此时 ROS 线程必须仍在运行；之后才停 ROS 线程，析构会话与节点，最后 `rclcpp::shutdown()`。
+- `StudioContext`：会话、模型、GUI 调度器、应用 scope、日志，注入给各面板。
+- `OperationRunner`：每个面板同一时间只运行一个操作。操作与 `wait_signal(停止按钮)` 用 `when_any` 竞争，结果经 `then_on(ObjectScope, …)` 回到 GUI 线程写入日志（`<名称>: started / succeeded / stopped / failed`）。`ObjectScope` 是应用 scope 的子 scope，面板析构或应用停止都会停止并排空它的操作。
+- 视口 `SceneView`：
+  - `QOpenGLWindow` 经 `QWidget::createWindowContainer` 嵌入，申请兼容配置的 OpenGL 上下文。原因：MuJoCo 3.8 的 `mjFB_WINDOW` 指默认帧缓冲，而 `QOpenGLWidget` 渲染到自己的 FBO。
+  - 渲染 `SceneMirror` 的 `mjData`，叠加目标位姿标记（球加三轴箭头）。左键拖动旋转，右键平移，滚轮缩放。相机按机器人刚体的包围盒取景，因为模型的 extent 包含地面。
+  - 启动时探测 OpenGL：建立不了上下文时（例如没有显示时的 `offscreen` 平台），用占位标签代替视口，其余功能照常。不探测的话，`QOpenGLWindow` 在没有上下文时会崩溃。
+- 面板（第 3 步）：
+  - 会话：使能、停放、失能、复位故障、停止、急停；显示电源、安全状态、故障、运行中的目标。
+  - 关节：目标、实测、速度、复制当前值、移动、停止。
+  - 笛卡尔：基座坐标系下的 xyz 与 RPY、复制当前位姿、±X/Y/Z 点动、移动、停止；目标同步到视口标记。
+  - 路径：路点列表，从当前位置或关节面板的目标添加，按等间隔时间经 `followPath` 执行。
+  - 夹爪：宽度、最大力、打开、关闭、夹取。
+  - 主窗口以 30 Hz 读取快照，依次更新 `SceneMirror`、视口、各面板和日志视图。
+- 后续加入：遥测曲线、录制、规划预览、在视口中拖动目标、遥操作（键盘、手柄或 SpaceMouse 以 50–100 Hz 发布伺服指令，第 5 步）、回放。
+- 脚本模式 `--script [--screenshots DIR]`：
+  - 通过真实按钮依次执行：使能 → 关节运动 → 位姿运动（下降 5 cm）→ 点动 → 夹取 → 两路点路径 → 慢速长运动并中途停止 → 急停 → 复位 → 停放 → 失能 → 退出。
+  - 每一步以日志中上一步的结果推进，并切换到对应面板。结束时检查全部步骤完成且没有操作失败，否则返回 2。
+  - 截图前先刷新界面，把视口帧缓冲合成进窗口截图。
+- 验证：CTest 用例 `larm_studio_script`。Python 驱动依次启动仿真运行时节点（2 倍实时）和 Studio 脚本模式，最后用 SIGINT 收束运行时，要求两个进程都正常退出。
+  - 默认 `QT_QPA_PLATFORM=offscreen`：不需要显示，视口为占位。
+  - 设置 `QT_QPA_PLATFORM=xcb` 时渲染真实画面。
+  - `rebot_b601` 的 `studio.launch.py` 另经 launch 做过冒烟验证。
 
 ### 6.11 larm_learning 与 larm_py
 
@@ -607,7 +630,11 @@ struct VectorEnvironment {
 机器人相关的内容全部是数据和启动文件，代码都在框架内。它们合在一个 ament 包 `robots/rebot_b601` 里：配置文件按相对路径引用描述文件，拆成两个包后在 colcon 默认的分包安装布局下路径会断开。
 
 - 描述：`scripts/generate_description.py` 按固定提交拉取上游 URDF 与网格（上游仓库没有许可证文件、网格共 64 MB，因此不入库），用 MuJoCo 的 `compile` 转为 MJCF 后补充：以控制关节命名的力矩型执行器、关节 `armature` / `damping` / `frictionloss`（摩擦取标定值，其余为估计值）、两指的 `equality joint` 耦合、碰撞分组（机器人几何体之间不接触，自碰撞留给规划阶段检查）；地面放在单独的场景文件中；最终 URDF 中 `joint_right` 声明为 `joint_left` 的 mimic（编译 MJCF 之后才加，避免 MuJoCo 再生成一条耦合约束）。输出写入被忽略的 `generated/`。MuJoCo 写出的 MJCF 只保留 6 位有效数字，因此与 URDF 的位姿、重力项相差约 1e-6。
-- 启动：`launch/sim.launch.py`（运行时节点 + `robot_state_publisher` + RViz；把 URDF 中的相对网格路径改写为 `file://` URI 供 RViz 使用）、`rviz/rebot.rviz`；真机与 Studio 的 launch、MoveIt 配置在对应步骤补充。
+- 启动：
+  - `launch/sim.launch.py`：运行时节点 + `robot_state_publisher` + RViz；把 URDF 中的相对网格路径改写为 `file://` URI 供 RViz 使用。
+  - `launch/studio.launch.py`：仿真加 Studio，关闭 Studio 即结束整个 launch。
+  - `rviz/rebot.rviz`。
+  - 真机 launch 与 MoveIt 配置在对应步骤补充。
 
 配置文件为 `robots/rebot_b601/config/rebot_b601_rs.yaml`。其中位置与力矩限值取自 URDF，增益取自 reBotArm_control_py；速度、加速度、加加速度限值是保守初值；夹爪的电机到位移换算、夹爪增益和电机侧超时还需要标定或实测。
 
@@ -618,11 +645,11 @@ struct VectorEnvironment {
 ```text
 lrebot_arm/
   larm/                        # 一个 CMake 工程，同时是 ament 包 larm
-    core/ model/ motion/ hal/ control/ sim/ runtime/ ros/   # 已实现
-    apps/sim_cli/ apps/runtime_node/                         # 已实现的组合根
-    tests/                                                   # 跨模块集成测试
-    drivers/robstride/ studio/ learning/ python/
-    apps/                      # 其余组合根：larm_studio、larm_driver_probe
+    core/ model/ motion/ hal/ control/ sim/ runtime/ ros/ studio/   # 已实现
+    apps/sim_cli/ apps/runtime_node/ apps/studio/                    # 已实现的组合根
+    tests/                                                           # 跨模块集成测试
+    drivers/robstride/ learning/ python/
+    apps/                      # 其余组合根：larm_driver_probe
   larm_msgs/                   # rosidl 接口包
   robots/rebot_b601/           # ament 包：config/ launch/ rviz/ scripts/ generated/
   tools/fetch_mujoco.sh
@@ -633,8 +660,8 @@ lrebot_arm/
 - 选择一个 CMake 工程加多个目标，而不是每个模块一个 ament 包：lexec 目前没有安装导出，跨包共享同一个 lexec 提供者很麻烦；单工程内可以在顶层先提供 `lexec::lexec`，再加入 lrclexec、lqtexec 与 co2，保证全程序只有一个提供者。模块边界由目标依赖保证。
 - 仓库根目录不放 CMakeLists.txt：colcon 会把它识别为一个包，不再向下发现 `larm_msgs` 等子包。
 - 模块是 STATIC 库：OBJECT 库的目标文件不会沿依赖链传递到最终链接。
-- 选项：已有 `LARM_WITH_MUJOCO`、`LARM_WITH_ROS`（CMake 预设中关闭，colcon 构建时打开）；后续加入 `LARM_WITH_QT`、`LARM_WITH_PYTHON`、`LARM_WITH_ONNX`。训练机器可以只构建核心、仿真与训练模块。
-- 外部依赖：lexec、co2、lrclexec 由 FetchContent 按固定提交拉取并标记为 SYSTEM，lrclexec 复用顶层提供的 `lexec::lexec`；本地开发可用 `FETCHCONTENT_SOURCE_DIR_<NAME>` 指向本地仓库。Pinocchio 与 Ruckig 来自 ROS 安装目录，构建前需要 source ROS 环境；Pinocchio 的 CMake 配置会探测 numpy，因此预设与 `colcon.meta` 都指定系统 Python。
+- 选项：已有 `LARM_WITH_MUJOCO`、`LARM_WITH_ROS`（CMake 预设中关闭，colcon 构建时打开）、`LARM_WITH_STUDIO`（还需要 ROS 与 MuJoCo，且找到 Qt 6 Widgets 与 OpenGL 时才构建，否则只提示跳过；官方 Qt 需要加入 `CMAKE_PREFIX_PATH`）；后续加入 `LARM_WITH_PYTHON`、`LARM_WITH_ONNX`。训练机器可以只构建核心、仿真与训练模块。
+- 外部依赖：lexec、co2、lrclexec、lqtexec 由 FetchContent 按固定提交拉取并标记为 SYSTEM，lrclexec 与 lqtexec 复用顶层提供的 `lexec::lexec`；本地开发可用 `FETCHCONTENT_SOURCE_DIR_<NAME>` 指向本地仓库。Pinocchio 与 Ruckig 来自 ROS 安装目录，构建前需要 source ROS 环境；Pinocchio 的 CMake 配置会探测 numpy，因此预设与 `colcon.meta` 都指定系统 Python。
 - 两条构建路径：`larm/` 下用 CMake 预设开发核心模块（不含 ROS 节点）；仓库根目录用 `colcon build --base-paths larm larm_msgs robots` 构建 ROS 工作区。安装时 MuJoCo 动态库随 larm 一起装进 `lib/`，可执行文件以 `$ORIGIN` 相对 RPATH 找到它。
 - TSan 预设带一份只针对 `libmujoco.so` 的抑制文件：预编译的 MuJoCo 未插桩，其加载模型时的内部线程池会产生误报。
 - `CMakePresets.json` 提供 debug、release、asan、tsan；sanitizer 预设使用 Clang，因为 MuJoCo 3.8 的 `mjsan.h` 在 GCC 13 下不合法。编译警告按项目 C++ 风格开启并视为错误。
@@ -657,7 +684,7 @@ lrebot_arm/
 
 1. **核心与仿真闭环**（已完成）：core、model、motion、hal、control、sim、`larm_sim_cli`。完成标准：在 MuJoCo 中确定性地跑完一条轨迹，各项测试通过，URDF 与 MJCF 一致性测试通过。另有测试保证控制周期运行时不做堆分配。
 2. **运行时与 ROS 2**（已完成）：runtime、msgs、ros。完成标准：仿真后端下 FollowJointTrajectory、MoveToPose、夹爪、急停、抢占通过 ROS 集成测试（进程内经 DDS 驱动节点）；launch 启动后命令行可操作，TF 完整。
-3. **Studio**：视口、会话、关节、笛卡尔、轨迹面板。完成标准：脚本模式走通主要流程。
+3. **Studio**（已完成）：远程会话、`SceneMirror`、视口，以及会话、关节、笛卡尔、路径、夹爪面板。完成标准：脚本模式走通主要流程。
 4. **真机**：RobStride 驱动，按"只读 → 使能保持 → 单关节小幅运动 → 慢速轨迹"逐级上真机；实测总线负载与周期抖动，确定控制频率。
 5. **示教与模仿学习**：遥操作与拖动示教录制、MCAP → LeRobot 转换、Python 推理节点经流式关节目标部署；先仿真后真机。
 6. **强化学习**：learning 环境、larm_py、示例任务（末端到达），PPO 训练，ONNX 部署到仿真再到真机。

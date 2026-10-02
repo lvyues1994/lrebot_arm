@@ -20,16 +20,22 @@ target_link_libraries(larm_ros
             ${rosgraph_msgs_TARGETS} ${sensor_msgs_TARGETS} ${std_srvs_TARGETS})
 larm_target_warnings(larm_ros)
 
-# One process runs the whole suite in order on one robot, so it is registered as a single test.
-if(LARM_BUILD_TESTS AND LARM_WITH_MUJOCO)
-    add_executable(larm_ros_tests tests/RuntimeNodeTest.cpp)
-    target_link_libraries(larm_ros_tests PRIVATE
+# Each suite runs in order on one robot in one process, so each is registered as a single test on
+# its own DDS domain.
+function(larm_ros_suite name source domain)
+    add_executable(${name} ${source})
+    target_link_libraries(${name} PRIVATE
         larm::ros larm::sim lrclexec::lrclexec rclcpp_action::rclcpp_action GTest::gtest_main
         ${control_msgs_TARGETS} ${larm_msgs_TARGETS} ${sensor_msgs_TARGETS} ${std_srvs_TARGETS}
         ${trajectory_msgs_TARGETS})
-    larm_test_warnings(larm_ros_tests)
-    add_test(NAME larm_ros_tests COMMAND larm_ros_tests)
-    set_tests_properties(larm_ros_tests PROPERTIES
-        ENVIRONMENT "LARM_ROBOT_PROFILE=${LARM_ROBOT_PROFILE};ROS_DOMAIN_ID=231;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST"
+    larm_test_warnings(${name})
+    add_test(NAME ${name} COMMAND ${name})
+    set_tests_properties(${name} PROPERTIES
+        ENVIRONMENT "LARM_ROBOT_PROFILE=${LARM_ROBOT_PROFILE};ROS_DOMAIN_ID=${domain};ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST"
         TIMEOUT 240)
+endfunction()
+
+if(LARM_BUILD_TESTS AND LARM_WITH_MUJOCO)
+    larm_ros_suite(larm_ros_tests tests/RuntimeNodeTest.cpp 231)
+    larm_ros_suite(larm_remote_session_tests tests/RemoteSessionTest.cpp 230)
 endif()

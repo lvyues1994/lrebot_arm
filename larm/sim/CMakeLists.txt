@@ -6,5 +6,6 @@ target_link_libraries(larm_sim PUBLIC larm::hal mujoco::mujoco)
 larm_target_warnings(larm_sim)
 
 if(LARM_BUILD_TESTS)
-    larm_add_test(larm_sim_tests SOURCES tests/SimulationTest.cpp LIBRARIES larm::sim larm::model)
+    larm_add_test(larm_sim_tests SOURCES tests/SimulationTest.cpp tests/SceneMirrorTest.cpp
+        LIBRARIES larm::sim larm::model)
 endif()

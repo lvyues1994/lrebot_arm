@@ -32,6 +32,7 @@ enum class MotionFailure : std::uint8_t {
 };
 
 std::string_view toString(MotionFailure failure) noexcept;
+std::optional<MotionFailure> failureFromString(std::string_view name) noexcept;
 
 // The error every session operation reports through set_error.
 struct MotionError : std::runtime_error {

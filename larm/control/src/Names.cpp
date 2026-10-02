@@ -1,5 +1,7 @@
 #include <larm/control/Controller.h>
 
+#include <type_traits>
+
 namespace larm::control {
 
 std::string_view toString(ControlStatus const status) noexcept {
@@ -42,6 +44,17 @@ std::string_view toString(FaultCode const fault) noexcept {
         return "emergency_stop";
     }
     return "unknown";
+}
+
+std::optional<FaultCode> faultFromString(std::string_view const name) noexcept {
+    for (auto code = std::underlying_type_t<FaultCode>{0};
+         code <= static_cast<std::underlying_type_t<FaultCode>>(FaultCode::EmergencyStop); ++code) {
+        auto const fault = static_cast<FaultCode>(code);
+        if (toString(fault) == name) {
+            return fault;
+        }
+    }
+    return std::nullopt;
 }
 
 } // namespace larm::control

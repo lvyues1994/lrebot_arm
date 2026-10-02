@@ -4,6 +4,7 @@
 #include <larm/model/RobotModel.h>
 
 #include <cstdint>
+#include <optional>
 #include <string_view>
 
 namespace larm::control {
@@ -26,6 +27,7 @@ enum class FaultCode : std::uint8_t {
 
 std::string_view toString(ControlStatus status) noexcept;
 std::string_view toString(FaultCode fault) noexcept;
+std::optional<FaultCode> faultFromString(std::string_view name) noexcept;
 
 struct ControlStep {
     ControlStatus status = ControlStatus::Running;

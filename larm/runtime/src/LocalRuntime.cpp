@@ -428,6 +428,17 @@ std::string_view toString(MotionFailure const failure) noexcept {
     return "unknown";
 }
 
+std::optional<MotionFailure> failureFromString(std::string_view const name) noexcept {
+    for (auto code = std::underlying_type_t<MotionFailure>{0};
+         code <= static_cast<std::underlying_type_t<MotionFailure>>(MotionFailure::Shutdown); ++code) {
+        auto const failure = static_cast<MotionFailure>(code);
+        if (toString(failure) == name) {
+            return failure;
+        }
+    }
+    return std::nullopt;
+}
+
 Expected<std::unique_ptr<RobotSession>> startLocalRuntime(RobotProfile profile,
                                                           std::unique_ptr<hal::Backend> backend,
                                                           RuntimeOptions const &options) {
