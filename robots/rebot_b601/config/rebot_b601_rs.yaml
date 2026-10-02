@@ -1,10 +1,10 @@
 # reBot B601-RS 机器人配置。相对路径以本文件所在目录为基准。
-# 描述文件由 rebot_b601_description/scripts/generate_description.py 生成。
+# 描述文件由 scripts/generate_description.py 生成。
 robot: rebot_b601_rs
 
 description:
-  urdf: ../../rebot_b601_description/generated/urdf/rebot_b601_rs.urdf
-  mjcf: ../../rebot_b601_description/generated/mjcf/scene.xml
+  urdf: ../generated/urdf/rebot_b601_rs.urdf
+  mjcf: ../generated/mjcf/scene.xml
 
 control:
   period_us: 4000

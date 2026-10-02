@@ -1,0 +1,10 @@
+file(GLOB_RECURSE larm_runtime_sources CONFIGURE_DEPENDS src/*.cpp src/*.h include/*.h)
+add_library(larm_runtime STATIC ${larm_runtime_sources})
+add_library(larm::runtime ALIAS larm_runtime)
+target_include_directories(larm_runtime PUBLIC include)
+target_link_libraries(larm_runtime PUBLIC larm::control lexec::lexec PRIVATE lexec::runtime)
+larm_target_warnings(larm_runtime)
+
+if(LARM_BUILD_TESTS AND LARM_WITH_MUJOCO)
+    larm_add_test(larm_runtime_tests SOURCES tests/LocalRuntimeTest.cpp LIBRARIES larm::runtime larm::sim)
+endif()

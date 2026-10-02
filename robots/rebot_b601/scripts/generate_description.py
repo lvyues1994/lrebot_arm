@@ -11,7 +11,7 @@ Usage:
 
 Without --upstream the pinned commit is cloned into <repo>/.deps.
 Output layout (ignored by git):
-    generated/urdf/rebot_b601_rs.urdf
+    generated/urdf/rebot_b601_rs.urdf    joint_right mimics joint_left
     generated/meshes/*.STL
     generated/mjcf/rebot_b601_rs.xml     robot only
     generated/mjcf/scene.xml             robot on a floor
@@ -101,6 +101,21 @@ def write_urdf(upstream_urdf: Path, output: Path) -> list[str]:
     (output / "urdf").mkdir(parents=True, exist_ok=True)
     tree.write(output / "urdf" / f"{ROBOT_NAME}.urdf", encoding="utf-8", xml_declaration=True)
     return sorted(set(meshes))
+
+
+def add_finger_mimic(output: Path) -> None:
+    """Declares the right finger as following the left one, for robot_state_publisher.
+
+    Added after the MJCF is compiled: MuJoCo would otherwise add a second coupling constraint.
+    """
+    path = output / "urdf" / f"{ROBOT_NAME}.urdf"
+    tree = ET.parse(path)
+    for joint in tree.getroot().iter("joint"):
+        if joint.get("name") == "joint_right":
+            ET.SubElement(joint, "mimic", {"joint": "joint_left", "multiplier": "1", "offset": "0"})
+            tree.write(path, encoding="utf-8", xml_declaration=True)
+            return
+    fail("joint_right missing from the URDF")
 
 
 def copy_meshes(upstream_urdf: Path, names: list[str], output: Path) -> None:
@@ -203,7 +218,7 @@ SCENE = f"""<mujoco model="{ROBOT_NAME}_scene">
 
 def main() -> None:
     package = Path(__file__).resolve().parent.parent
-    repository = package.parents[2]
+    repository = package.parents[1]
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--upstream", type=Path, help="existing reBotArm_control_py checkout")
     parser.add_argument("--mujoco-compile", type=Path,
@@ -225,6 +240,7 @@ def main() -> None:
     meshes = write_urdf(upstream_urdf, output)
     copy_meshes(upstream_urdf, meshes, output)
     mjcf = compile_raw_mjcf(output, args.mujoco_compile)
+    add_finger_mimic(output)
     extend_mjcf(mjcf)
     ET.indent(mjcf)
     mjcf.write(output / "mjcf" / f"{ROBOT_NAME}.xml", encoding="utf-8")

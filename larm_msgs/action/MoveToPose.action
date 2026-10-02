@@ -1,0 +1,10 @@
+# Moves the group's tool frame to a pose, rest to rest.
+
+# frame_id must be empty or the group's base frame.
+geometry_msgs/PoseStamped target
+# Fraction of the robot's motion limits in (0, 1]; 0 means 1.
+float64 speed
+---
+# Measured joint positions when the motion finished, in the group's joint order.
+float64[] positions
+---

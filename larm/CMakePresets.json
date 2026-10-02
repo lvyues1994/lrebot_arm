@@ -11,7 +11,7 @@
         "CMAKE_EXPORT_COMPILE_COMMANDS": true,
         "LARM_BUILD_TESTS": true,
         "LARM_WARNINGS_AS_ERRORS": true,
-        "LARM_MUJOCO_ROOT": "${sourceDir}/../.deps/mujoco-3.8.0",
+        "LARM_WITH_ROS": false,
         "Python3_EXECUTABLE": "/usr/bin/python3",
         "PYTHON_EXECUTABLE": "/usr/bin/python3"
       }
@@ -60,6 +60,11 @@
     {"name": "debug", "inherits": "base", "configurePreset": "debug"},
     {"name": "release", "inherits": "base", "configurePreset": "release"},
     {"name": "asan", "inherits": "base", "configurePreset": "asan"},
-    {"name": "tsan", "inherits": "base", "configurePreset": "tsan"}
+    {
+      "name": "tsan",
+      "inherits": "base",
+      "configurePreset": "tsan",
+      "environment": {"TSAN_OPTIONS": "suppressions=${sourceDir}/tsan.supp"}
+    }
   ]
 }

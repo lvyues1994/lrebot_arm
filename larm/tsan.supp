@@ -1,0 +1,3 @@
+# libmujoco.so is prebuilt without TSan instrumentation (and against libc++); the thread pool it uses
+# to compile meshes inside mj_loadXML synchronizes in ways TSan cannot observe.
+called_from_lib:libmujoco.so

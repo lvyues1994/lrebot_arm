@@ -8,6 +8,6 @@ target_link_libraries(larm_motion PUBLIC larm::core PRIVATE ruckig::ruckig)
 larm_target_warnings(larm_motion)
 
 if(LARM_BUILD_TESTS)
-    larm_add_test(larm_motion_tests SOURCES tests/PointToPointTest.cpp tests/StopPlannerTest.cpp
+    larm_add_test(larm_motion_tests SOURCES tests/PointToPointTest.cpp tests/StopPlannerTest.cpp tests/WaypointTest.cpp
         LIBRARIES larm::motion)
 endif()

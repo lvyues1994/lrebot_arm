@@ -5,6 +5,8 @@
 #include <larm/motion/JointTrajectory.h>
 
 #include <memory>
+#include <optional>
+#include <span>
 
 namespace larm::motion {
 
@@ -27,6 +29,19 @@ struct PointToPointRequest {
 
 // Time-optimal, jerk-limited motion that ends at rest on the target with all joints arriving together.
 Expected<std::shared_ptr<JointTrajectory const>> planPointToPoint(PointToPointRequest const &request);
+
+struct TimedWaypoint {
+    Duration time{};
+    JointVector position;
+    std::optional<JointVector> velocity;
+    std::optional<JointVector> acceleration;
+};
+
+// Piecewise polynomial through the waypoints: quintic on segments whose ends carry velocities and
+// accelerations, cubic Hermite otherwise. Missing velocities come from neighbouring waypoints and are
+// zero at both ends. The first waypoint must be at time zero and times must increase.
+Expected<std::shared_ptr<JointTrajectory const>>
+interpolateWaypoints(std::span<TimedWaypoint const> waypoints);
 
 // Re-plans a stop in place. Construct it off the control loop; plan() and trajectory() never allocate.
 struct StopPlanner {

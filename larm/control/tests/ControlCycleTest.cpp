@@ -1,4 +1,5 @@
 #include <larm/control/ControlCycle.h>
+#include <larm/control/GripperController.h>
 #include <larm/control/JointTrajectoryController.h>
 #include <larm/hal/IdealBackend.h>
 
@@ -323,6 +324,52 @@ TEST_F(ControlCycleTest, NonFiniteCommandsFault) {
     EXPECT_EQ(snapshot().safety, SafetyState::Faulted);
     EXPECT_EQ(snapshot().fault, FaultCode::InvalidCommand);
     EXPECT_TRUE(std::isfinite(backend->lastCommand().position[2]));
+}
+
+std::unique_ptr<Controller> gripTo(double const target) {
+    return makeGripperController({
+        .joint = 6,
+        .target = target,
+        .maxEffort = 5.0,
+        .speed = 0.05,
+        .stiffness = 2000.0,
+        .damping = 40.0,
+        .positionTolerance = 0.001,
+        .stallVelocity = 0.005,
+        .stallTime = std::chrono::milliseconds{100},
+    });
+}
+
+TEST_F(ControlCycleTest, GripperReachesItsTarget) {
+    enable();
+    push(ActivateController{.goal = GoalId{12}, .controller = gripTo(0.045)});
+    for (int i = 0; i < 300 and not finished(GoalId{12}); ++i) {
+        run(1);
+    }
+    ASSERT_TRUE(finished(GoalId{12}));
+    EXPECT_EQ(finished(GoalId{12})->status, ControlStatus::Succeeded);
+    run(1);
+    EXPECT_NEAR(backend->lastCommand().position[6], 0.045, 0.001);
+}
+
+TEST_F(ControlCycleTest, GripperForceLimitBoundsTheImpedanceOffset) {
+    enable();
+    push(ActivateController{.goal = GoalId{13}, .controller = gripTo(0.0)});
+    run(5);
+    auto const &command = backend->lastCommand();
+    auto const offset = std::abs(command.position[6] - snapshot().state.joints.position[6]);
+    EXPECT_LE(command.stiffness[6] * offset, 5.0 + 1e-9);
+}
+
+TEST_F(ControlCycleTest, GripperStallsWhenItCannotReachTheTarget) {
+    enable();
+    push(ActivateController{.goal = GoalId{14}, .controller = gripTo(-0.01)});
+    for (int i = 0; i < 400 and not finished(GoalId{14}); ++i) {
+        run(1);
+    }
+    ASSERT_TRUE(finished(GoalId{14}));
+    EXPECT_EQ(finished(GoalId{14})->status, ControlStatus::Succeeded);
+    EXPECT_NEAR(snapshot().state.joints.position[6], 0.0, 1e-9);
 }
 
 TEST_F(ControlCycleTest, DisablingStopsGoalsAndReportsPowerOff) {

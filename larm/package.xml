@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>larm</name>
+  <version>0.1.0</version>
+  <description>A general robot arm framework: model, motion, real-time control, MuJoCo simulation and a ROS 2 runtime.</description>
+  <maintainer email="yu.shang@thundersoft.com">yu.shang</maintainer>
+  <license>Unspecified</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>control_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>larm_msgs</depend>
+  <depend>pinocchio</depend>
+  <depend>rclcpp</depend>
+  <depend>rclcpp_action</depend>
+  <depend>rosgraph_msgs</depend>
+  <depend>ruckig</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>trajectory_msgs</depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

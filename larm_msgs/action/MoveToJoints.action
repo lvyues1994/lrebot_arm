@@ -1,0 +1,11 @@
+# Rest-to-rest joint motion of one group.
+
+# Names of the group's joints in the order of `positions`; empty means the group's own order.
+string[] joint_names
+float64[] positions
+# Fraction of the robot's motion limits in (0, 1]; 0 means 1.
+float64 speed
+---
+# Measured positions when the motion finished, in the goal's joint order.
+float64[] positions
+---

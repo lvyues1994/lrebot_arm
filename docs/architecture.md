@@ -133,7 +133,7 @@ MuJoCo 与控制周期在同一进程、同一线程中锁步，物理推进的�
 flowchart LR
   subgraph P1["进程 larm_runtime（真机或仿真后端）"]
     RT["实时线程<br/>tick() + advance()"]
-    EV["事件线程<br/>run_loop：事件泵、sender 完成"]
+    EV["协调器线程<br/>事件泵、目标激活、完成投递"]
     POOL["规划线程池<br/>IK、轨迹、碰撞"]
     ROSX["ROS 执行器线程<br/>lrclexec TimerScheduler"]
     POL["策略线程（可选）<br/>ONNX 推理"]
@@ -156,7 +156,7 @@ flowchart LR
 | 线程 | 运行内容 | 约束 |
 |---|---|---|
 | 实时线程 | `tick()` → `advance()` | 真机下 SCHED_FIFO、绑核、`mlockall`；不分配、不加锁、不进 ROS |
-| 事件线程 | lexec `run_loop`；排空实时事件并完成对应 operation | 实时线程产生事件时写一次 eventfd 唤醒它 |
+| 协调器线程 | 排空实时事件、激活等待中的目标、投递 sender 完成 | 每 2 ms 轮询一次；完成延迟不超过一个轮询周期，实时侧不需要额外的唤醒系统调用 |
 | 规划线程池 | lexec `static_thread_pool`，执行 IK、轨迹生成、碰撞检查 | 只做纯计算 |
 | ROS 执行器线程 | `SingleThreadedExecutor` + lrclexec | 不阻塞；sender 完成后经 `continues_on` 回到这里 |
 | 策略线程 | 按策略频率推理，写流式设定值 | 只在部署策略时存在 |
@@ -271,7 +271,7 @@ struct Backend {
 }
 ```
 
-后续加入：驱动注册表（配置中的 `driver.type` 选择工厂）随第 2 步的运行时节点实现；执行器空间到关节空间的传动适配器随第 4 步的真机驱动实现。
+后续加入：驱动注册表（配置中的 `driver.type` 选择工厂）与执行器空间到关节空间的传动适配器，随第 4 步的真机驱动实现；在此之前运行时节点只有 `mujoco` 后端。
 
 ### 5.3 控制器与控制周期
 
@@ -381,44 +381,46 @@ sequenceDiagram
 这是框架对上层的稳定接口。本地实现在 `larm_runtime`，远程实现（经 ROS 2）在 `larm_ros`；Studio、co2 任务、测试只依赖接口，不区分本地还是远程。
 
 ```cpp
-namespace larm {
+namespace larm::runtime {
 
-template <class... T>
-using Async = lexec::any_sender_of<lexec::set_value_t(T...),
+template <class... Values>
+using Async = lexec::any_sender_of<lexec::set_value_t(Values...),
                                    lexec::set_error_t(std::exception_ptr),
                                    lexec::set_stopped_t()>;
 
-struct MotionApi {   // 一个关节组的运动
+struct MotionApi {   // 一个带工具帧的关节组
     virtual ~MotionApi() = default;
-    virtual Async<MotionResult> moveToJoints(JointGoal const &goal) = 0;
-    virtual Async<MotionResult> moveToPose(PoseGoal const &goal) = 0;
-    virtual Async<MotionResult> followWaypoints(JointWaypoints const &waypoints) = 0;
-    virtual Expected<std::unique_ptr<StreamSession>> openStream(StreamConfig const &config) = 0;   // 遥操作、策略
+    virtual Async<MotionResult> moveToJoints(JointGoal goal) = 0;
+    virtual Async<MotionResult> moveToPose(PoseGoal goal) = 0;
+    virtual Async<MotionResult> followPath(JointPath path) = 0;   // 带时间的路点；首点晚于 0 时从当前位置出发
 };
 
-struct GripperApi {
+struct GripperApi {   // 单关节组
     virtual ~GripperApi() = default;
-    virtual Async<GripResult> grip(GripGoal const &goal) = 0;
+    virtual Async<GripResult> grip(GripGoal goal) = 0;
 };
 
 struct RobotSession {
     virtual ~RobotSession() = default;
+    virtual RobotProfile const &profile() const noexcept = 0;
     virtual Async<> enable() = 0;
-    virtual Async<> park() = 0;                 // 回到停放姿态
-    virtual Async<> disable() = 0;              // 不在停放姿态时拒绝，除非显式强制
+    virtual Async<> disable(DisableOptions options) = 0;   // 不在停放姿态时拒绝，除非 force
+    virtual Async<MotionResult> park() = 0;                // 回到停放姿态
     virtual Async<> resetFault() = 0;
     virtual void emergencyStop() noexcept = 0;
-    virtual RobotSnapshot latest() const = 0;
-    virtual MotionApi *motion(JointGroupId group) = 0;   // 取一次句柄，之后直接调用
-    virtual GripperApi *gripper(JointGroupId group) = 0;
+    virtual control::RobotSnapshot latest() const = 0;
+    virtual MotionApi *motion(std::string_view group) = 0;   // 取一次句柄，之后直接调用
+    virtual GripperApi *gripper(std::string_view group) = 0;
 };
 
 }
 ```
 
+失败统一以 `MotionError{reason, fault}` 报告，`reason` 区分无效目标、不可达、规划失败、未使能、故障、超时、关闭。流式会话（遥操作、策略）随第 3、5 步加入。
+
 语义：
 
-- 完成发生在运行时事件线程（远程实现中为 ROS 执行器线程），调用方用 `continues_on` 回到自己的上下文。
+- 完成发生在运行时的协调器线程（远程实现中为 ROS 执行器线程），调用方用 `continues_on` 回到自己的上下文。
 - 停止请求映射为受控停止，以 `set_stopped` 完成；规划失败、跟踪超差、系统故障以 `set_error(MotionError)` 完成。
 - 同一关节组的新目标抢占旧目标：旧目标受控停止并以 stopped 完成，新目标从停稳状态开始。这与 lrclexec 抢占式 Action 服务端的语义一致。
 
@@ -506,27 +508,19 @@ CO2_END
 
 ### 6.8 larm_runtime
 
-- 职责：5.5 中 `RobotSession`、`MotionApi`、`GripperApi` 的本地实现。
+- 职责：5.5 中 `RobotSession`、`MotionApi`、`GripperApi` 的本地实现，入口为 `startLocalRuntime(profile, backend, options)`。
 - 组成：
-  - `RuntimeHost`：持有后端、`ControlCycle`、`RealtimeRunner`、通道、事件线程（lexec `run_loop`）、规划线程池（`static_thread_pool`）、`counting_scope`。
-  - 事件泵：实时线程有事件时写一次 eventfd；事件线程被唤醒后排空 `events` 与 `retired`，按 `GoalId` 完成对应 operation。
-  - `ControllerFactory`：按目标构造控制器实例（非实时，允许分配）。
-  - `StreamSession`：持有 `LatestValue<StreamTarget>` 与对应控制器；关闭会话即释放占用。
-- 验证：以 MuJoCo 后端快速仿真为底座的 sender 语义测试：成功、取消即受控停止、抢占、故障转 error、关闭时排空。
+  - 本地会话：持有后端、模型、`ControlCycle`、`RealtimeRunner`、协调器和规划线程池（lexec `static_thread_pool`）。析构顺序为停实时线程 → 关协调器（仍在进行的操作以 `Shutdown` 失败）→ 释放线程池。
+  - 规划：IK、目标校验在线程池上完成；不合法的目标在这里以 `MotionError` 拒绝。
+  - 协调器：唯一的实时请求生产者（加锁串行化多个调用线程）。每 2 ms 排空实时事件，按关节重叠处理抢占：运行中的旧目标先受控停止，尚在等待的旧目标直接以 stopped 结束。控制器在激活时才由 `ControllerFactory` 按当时的指令状态构造，所以被抢占后会从停稳的位置重新规划。
+  - sender：`GoalSender`、`WaitSender` 的操作状态由 `shared_ptr` 持有，接收者只取一次；停止回调只登记取消，所有完成都在协调器线程上投递。
+- 验证：以 MuJoCo 后端为底座的 12 个 sender 语义测试（关节、位姿、路径、夹爪、取消、抢占、手臂与夹爪并行、急停与复位、停放后失能、关闭时失败），在 ASan/UBSan 与 TSan 下重复运行。
 
 ### 6.9 larm_msgs 与 larm_ros
 
-- `larm_msgs`：`ArmStatus`（电源、安全状态、故障码、各组活动控制器）、`SceneState`（模型摘要 + 全世界 `qpos`）、Action `MoveToPose`、`MoveToJoints`、`RunPolicy`；其余用标准消息。
-- 运行时节点 `larm_runtime_node`（LifecycleNode，组合根）：
-
-| 生命周期转换 | 动作 |
-|---|---|
-| configure | 加载配置，构造模型与后端，启动实时线程；电机失能，只发布状态 |
-| activate | 使能电机，进入 Hold，打开所有指令接口 |
-| deactivate | 停止全部目标；处于停放姿态时失能，否则转换失败并保持（先调用 `~/park`） |
-| cleanup | 停止实时线程，断开后端 |
-
-- 接口：
+- `larm_msgs`：已有 `ArmStatus`（使能、反馈新鲜度、安全状态、故障、正在运行目标的组、最近一次失败原因）、Action `MoveToJoints`、`MoveToPose`；`SceneState`、`RunPolicy` 随第 3、5 步加入。其余用标准消息。
+- 运行时节点 `larm_runtime_node`（组合根）：参数 `profile`、`backend`（目前为 `mujoco`）、`real_time_factor`、`start_position`、`rt_priority`。用普通节点加 `~/enable`、`~/disable`、`~/park`、`~/reset_fault`、`~/emergency_stop` 服务表达电源与安全状态，而不是 LifecycleNode：使能要等刚度爬升完成，生命周期回调里不应等待；需要时可以在外面再包一层生命周期。
+- 接口（第 2 步实现了前两行与 Action、服务；其余随后续步骤加入）：
 
 | 类型 | 名称 | 消息 |
 |---|---|---|
@@ -540,12 +534,13 @@ CO2_END
 | Action | `~/run_policy`（启用 ONNX 时） | `larm_msgs/RunPolicy` |
 | 订阅 | `~/<组>/servo/twist`、`~/<组>/servo/joint_jog` | `geometry_msgs/TwistStamped`、`control_msgs/JointJog` |
 | 订阅 | `~/<组>/stream/joint_target` | `sensor_msgs/JointState`（外部策略节点的流式关节目标） |
-| 服务 | `~/emergency_stop`、`~/reset_fault`、`~/park` | `std_srvs/Trigger` |
+| 服务 | `~/enable`、`~/disable`、`~/park`、`~/reset_fault`、`~/emergency_stop` | `std_srvs/Trigger`（完成后才应答） |
 
-- Action 服务端用 `make_action_server_preempt`，工厂返回 `MotionApi` 的 sender 再 `continues_on` 到 ROS 调度器；状态发布是 co2 循环或 lexec `repeat`，读取 `LatestValue` 快照。
-- `RosRobotSession`：`RobotSession` 的远程实现，基于 `execute_action`、`call_service`、`wait_message`，供 Studio 与远程脚本使用。
-- 收束遵守 lrclexec 的约束：不在执行器回调中对依赖同一执行器的 sender 做 `sync_wait`；Action 客户端与服务端活到执行器停止之后。
-- 验证：`launch_testing` 启动快速仿真后端，用 Action 客户端执行轨迹并检查结果。
+- Action 服务端用 lrclexec 的 `make_action_server_preempt`，工厂直接返回 `MotionApi` 的 sender。`/joint_states` 使用描述中的关节名（夹爪为 `joint_left`，`joint_right` 由 URDF 的 mimic 推出）；仿真时与 `/clock` 一样以仿真时间打戳。状态发布是一个 co2 协程循环，`CO2_AWAIT` lrclexec 的定时 sender（非 lexec 命名空间的 sender 需经 `lexec::coro::as_awaitable`）。
+- 失败原因：lrclexec 的服务端在 error 时以空 result 中止，因此原因写入节点日志与 `~/status` 的 `last_error`。若希望 Action result 本身带错误码，需要 lrclexec 支持"带 result 的 abort"。
+- 收束：`SignalStop` 触发停止 → 关闭各 Action 服务端 → `spin_with_scope` 排空 scope → 析构节点与会话；遵守 lrclexec 的约束（不在执行器回调中阻塞等待依赖同一执行器的 sender；Action 客户端与服务端活到执行器停止之后）。
+- `RosRobotSession`（`RobotSession` 的远程实现，基于 `execute_action`、`call_service`、`wait_message`）随第 3 步的 Studio 加入。
+- 验证：进程内集成测试经 DDS 驱动节点（11 个场景：关节状态、使能、FollowJointTrajectory、MoveToJoints、MoveToPose、GripperCommand、无效目标、抢占、取消、急停与复位、停放后失能）；另以 launch 启动仿真做命令行冒烟验证与 Ctrl+C 收束验证。
 
 ### 6.10 larm_studio
 
@@ -609,12 +604,12 @@ struct VectorEnvironment {
 
 ## 7 reBot B601-RS 落地
 
-机器人相关的内容全部是数据和启动文件，代码都在框架内：
+机器人相关的内容全部是数据和启动文件，代码都在框架内。它们合在一个 ament 包 `robots/rebot_b601` 里：配置文件按相对路径引用描述文件，拆成两个包后在 colcon 默认的分包安装布局下路径会断开。
 
-- `rebot_b601_description`：`scripts/generate_description.py` 按固定提交拉取上游 URDF 与网格（上游仓库没有许可证文件、网格共 64 MB，因此不入库），用 MuJoCo 的 `compile` 转为 MJCF 后补充：以控制关节命名的力矩型执行器、关节 `armature` / `damping` / `frictionloss`（摩擦取标定值，其余为估计值）、两指的 `equality joint` 耦合、碰撞分组（机器人几何体之间不接触，自碰撞留给规划阶段检查）；地面放在单独的场景文件中。输出写入被忽略的 `generated/`。MuJoCo 写出的 MJCF 只保留 6 位有效数字，因此与 URDF 的位姿、重力项相差约 1e-6。
-- `rebot_b601_bringup`：配置文件、launch（真机、仿真、Studio）、RViz 配置；MoveIt 配置在需要时补充。
+- 描述：`scripts/generate_description.py` 按固定提交拉取上游 URDF 与网格（上游仓库没有许可证文件、网格共 64 MB，因此不入库），用 MuJoCo 的 `compile` 转为 MJCF 后补充：以控制关节命名的力矩型执行器、关节 `armature` / `damping` / `frictionloss`（摩擦取标定值，其余为估计值）、两指的 `equality joint` 耦合、碰撞分组（机器人几何体之间不接触，自碰撞留给规划阶段检查）；地面放在单独的场景文件中；最终 URDF 中 `joint_right` 声明为 `joint_left` 的 mimic（编译 MJCF 之后才加，避免 MuJoCo 再生成一条耦合约束）。输出写入被忽略的 `generated/`。MuJoCo 写出的 MJCF 只保留 6 位有效数字，因此与 URDF 的位姿、重力项相差约 1e-6。
+- 启动：`launch/sim.launch.py`（运行时节点 + `robot_state_publisher` + RViz；把 URDF 中的相对网格路径改写为 `file://` URI 供 RViz 使用）、`rviz/rebot.rviz`；真机与 Studio 的 launch、MoveIt 配置在对应步骤补充。
 
-配置文件为 `robots/rebot_b601/rebot_b601_bringup/config/rebot_b601_rs.yaml`。其中位置与力矩限值取自 URDF，增益取自 reBotArm_control_py；速度、加速度、加加速度限值是保守初值；夹爪的电机到位移换算、夹爪增益和电机侧超时还需要标定或实测。
+配置文件为 `robots/rebot_b601/config/rebot_b601_rs.yaml`。其中位置与力矩限值取自 URDF，增益取自 reBotArm_control_py；速度、加速度、加加速度限值是保守初值；夹爪的电机到位移换算、夹爪增益和电机侧超时还需要标定或实测。
 
 该机械臂没有抱闸，失能后会在重力下落下。因此：失能只在停放姿态（q=0，夹爪由桌面支撑）执行；故障反应默认是保持而不是失能；主机失联时只能依靠电机侧 CAN 超时，该功能需要在 RobStride 手册中确认，不支持时只剩物理支撑和断电急停。同一框架换成 B601-DM（达妙电机）时，新增一个达妙驱动和一份配置即可，其余不变。
 
@@ -622,26 +617,26 @@ struct VectorEnvironment {
 
 ```text
 lrebot_arm/
-  larm/                        # 一个 CMake 工程，后续同时作为 ament 包
-    core/ model/ motion/ hal/ control/ sim/      # 已实现
-    apps/sim_cli/                                # 已实现
-    tests/                                       # 跨模块集成测试
-    drivers/robstride/ runtime/ ros/ studio/ learning/ python/
-    apps/                      # 其余组合根：larm_runtime_node、larm_studio、larm_driver_probe
+  larm/                        # 一个 CMake 工程，同时是 ament 包 larm
+    core/ model/ motion/ hal/ control/ sim/ runtime/ ros/   # 已实现
+    apps/sim_cli/ apps/runtime_node/                         # 已实现的组合根
+    tests/                                                   # 跨模块集成测试
+    drivers/robstride/ studio/ learning/ python/
+    apps/                      # 其余组合根：larm_studio、larm_driver_probe
   larm_msgs/                   # rosidl 接口包
-  robots/rebot_b601/
-    rebot_b601_description/    # scripts/generate_description.py → generated/
-    rebot_b601_bringup/        # config/rebot_b601_rs.yaml
+  robots/rebot_b601/           # ament 包：config/ launch/ rviz/ scripts/ generated/
   tools/fetch_mujoco.sh
-  deps.repos                   # lexec、co2、lrclexec、lqtexec 的固定提交
+  colcon.meta                  # 为各包指定系统 Python
   docs/
 ```
 
 - 选择一个 CMake 工程加多个目标，而不是每个模块一个 ament 包：lexec 目前没有安装导出，跨包共享同一个 lexec 提供者很麻烦；单工程内可以在顶层先提供 `lexec::lexec`，再加入 lrclexec、lqtexec 与 co2，保证全程序只有一个提供者。模块边界由目标依赖保证。
 - 仓库根目录不放 CMakeLists.txt：colcon 会把它识别为一个包，不再向下发现 `larm_msgs` 等子包。
 - 模块是 STATIC 库：OBJECT 库的目标文件不会沿依赖链传递到最终链接。
-- 选项：已有 `LARM_WITH_MUJOCO`；后续加入 `LARM_WITH_ROS`、`LARM_WITH_QT`、`LARM_WITH_PYTHON`、`LARM_WITH_ONNX`。训练机器可以只构建核心、仿真与训练模块。
-- 外部依赖来源：先用父工程或本地源码目录（与 lrclexec、lqtexec 现有做法一致），否则 FetchContent 拉取固定提交。Pinocchio 与 Ruckig 来自 ROS 安装目录，构建前需要 source ROS 环境。
+- 选项：已有 `LARM_WITH_MUJOCO`、`LARM_WITH_ROS`（CMake 预设中关闭，colcon 构建时打开）；后续加入 `LARM_WITH_QT`、`LARM_WITH_PYTHON`、`LARM_WITH_ONNX`。训练机器可以只构建核心、仿真与训练模块。
+- 外部依赖：lexec、co2、lrclexec 由 FetchContent 按固定提交拉取并标记为 SYSTEM，lrclexec 复用顶层提供的 `lexec::lexec`；本地开发可用 `FETCHCONTENT_SOURCE_DIR_<NAME>` 指向本地仓库。Pinocchio 与 Ruckig 来自 ROS 安装目录，构建前需要 source ROS 环境；Pinocchio 的 CMake 配置会探测 numpy，因此预设与 `colcon.meta` 都指定系统 Python。
+- 两条构建路径：`larm/` 下用 CMake 预设开发核心模块（不含 ROS 节点）；仓库根目录用 `colcon build --base-paths larm larm_msgs robots` 构建 ROS 工作区。安装时 MuJoCo 动态库随 larm 一起装进 `lib/`，可执行文件以 `$ORIGIN` 相对 RPATH 找到它。
+- TSan 预设带一份只针对 `libmujoco.so` 的抑制文件：预编译的 MuJoCo 未插桩，其加载模型时的内部线程池会产生误报。
 - `CMakePresets.json` 提供 debug、release、asan、tsan；sanitizer 预设使用 Clang，因为 MuJoCo 3.8 的 `mjsan.h` 在 GCC 13 下不合法。编译警告按项目 C++ 风格开启并视为错误。
 
 ## 9 验证策略
@@ -661,7 +656,7 @@ lrebot_arm/
 每一步都产出可以运行和验证的纵向切片：
 
 1. **核心与仿真闭环**（已完成）：core、model、motion、hal、control、sim、`larm_sim_cli`。完成标准：在 MuJoCo 中确定性地跑完一条轨迹，各项测试通过，URDF 与 MJCF 一致性测试通过。另有测试保证控制周期运行时不做堆分配。
-2. **运行时与 ROS 2**：runtime、msgs、ros。完成标准：仿真后端下 FollowJointTrajectory、MoveToPose、夹爪、急停、抢占在 `launch_testing` 中通过；RViz 显示正常。
+2. **运行时与 ROS 2**（已完成）：runtime、msgs、ros。完成标准：仿真后端下 FollowJointTrajectory、MoveToPose、夹爪、急停、抢占通过 ROS 集成测试（进程内经 DDS 驱动节点）；launch 启动后命令行可操作，TF 完整。
 3. **Studio**：视口、会话、关节、笛卡尔、轨迹面板。完成标准：脚本模式走通主要流程。
 4. **真机**：RobStride 驱动，按"只读 → 使能保持 → 单关节小幅运动 → 慢速轨迹"逐级上真机；实测总线负载与周期抖动，确定控制频率。
 5. **示教与模仿学习**：遥操作与拖动示教录制、MCAP → LeRobot 转换、Python 推理节点经流式关节目标部署；先仿真后真机。

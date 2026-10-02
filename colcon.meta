@@ -1,0 +1,13 @@
+{
+  "names": {
+    "larm": {
+      "cmake-args": ["-DPython3_EXECUTABLE=/usr/bin/python3", "-DPYTHON_EXECUTABLE=/usr/bin/python3"]
+    },
+    "larm_msgs": {
+      "cmake-args": ["-DPython3_EXECUTABLE=/usr/bin/python3"]
+    },
+    "rebot_b601": {
+      "cmake-args": ["-DPython3_EXECUTABLE=/usr/bin/python3"]
+    }
+  }
+}
