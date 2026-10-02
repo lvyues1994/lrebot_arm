@@ -33,7 +33,7 @@
 
 ### 2.2 软件环境（本机）
 
-Ubuntu 24.04、GCC 13.3、ROS 2 Jazzy。Jazzy 软件包：Pinocchio 4.1.0、Coal 3.0.3、Ruckig 0.9.2、ros2_control 4.48、MoveIt 2.12.4、tl-expected。Qt 6.8.3（`~/Qt`）与系统 Qt 5.15.13。MuJoCo 3.8.0 目前借用 Isaac Sim 预打包的 SDK，建议改装官方发布包到固定前缀。
+Ubuntu 24.04、GCC 13.3、ROS 2 Jazzy。Jazzy 软件包：Pinocchio 4.1.0、Coal 3.0.3、Ruckig 0.9.2、ros2_control 4.48、MoveIt 2.12.4、tl-expected。Qt 6.8.3（`~/Qt`）与系统 Qt 5.15.13。MuJoCo 使用官方 3.8.0 发布包，由 `tools/fetch_mujoco.sh` 按固定哈希下载到 `.deps/`（不入库）。ROS 的 `tl_expected` 包已标记弃用，改用系统的 `libexpected-dev`。
 
 ### 2.3 自有库
 
@@ -212,7 +212,7 @@ struct ActuatorStatus {
 
 struct RobotState {
     std::uint64_t cycle{};
-    SteadyTime stamp{};
+    TimePoint stamp{};
     JointState joints;
     std::array<ActuatorStatus, kMaxDof> actuators{};
     bool isFresh{};   // 本周期所有关节反馈齐全且未超时
@@ -248,7 +248,7 @@ struct RealtimeIo {
 // 时间所有者：真机睡到下个周期；仿真推进物理并按策略节流
 struct Timeline {
     virtual ~Timeline() = default;
-    virtual SteadyTime now() const noexcept = 0;
+    virtual TimePoint now() const noexcept = 0;
     virtual void advance() noexcept = 0;
 };
 
@@ -261,19 +261,17 @@ struct RobotDriver {
     virtual RealtimeIo &io() = 0;
 };
 
+// 一个驱动及驱动它的时间线。仿真后端在此之上提供 reset() 与 MuJoCo 状态访问。
 struct Backend {
-    std::unique_ptr<RobotDriver> driver;
-    std::unique_ptr<Timeline> timeline;
+    virtual ~Backend() = default;
+    virtual RobotDriver &driver() = 0;
+    virtual Timeline &timeline() = 0;
 };
-
-// 组合根把驱动工厂登记到注册表；配置里的 driver.type 选择其一
-using BackendFactory = std::function<Expected<Backend>(RobotProfile const &, ConfigNode const &driverSection)>;
-
-// 传动适配器：把执行器空间的 RealtimeIo 包装成关节空间
-std::unique_ptr<RealtimeIo> makeTransmissionIo(RealtimeIo &actuatorIo, TransmissionTable const &table);
 
 }
 ```
+
+后续加入：驱动注册表（配置中的 `driver.type` 选择工厂）随第 2 步的运行时节点实现；执行器空间到关节空间的传动适配器随第 4 步的真机驱动实现。
 
 ### 5.3 控制器与控制周期
 
@@ -290,8 +288,8 @@ struct ControlStep {
 };
 
 struct ControlContext {
-    SteadyTime now;
-    std::chrono::nanoseconds period;
+    TimePoint now;
+    Duration period;
     RobotState const &state;
     ModelCache const &model;   // 本周期已算好的 FK、雅可比、重力力矩，控制器与安全层共用
 };
@@ -299,7 +297,6 @@ struct ControlContext {
 struct Controller {
     virtual ~Controller() = default;
     virtual JointMask claims() const noexcept = 0;       // 占用的关节；同时激活的控制器必须互不相交
-    virtual hal::CommandMode mode() const noexcept = 0;
     virtual ControlStep start(ControlContext const &ctx) noexcept = 0;   // 从当前状态无扰接管
     virtual ControlStep update(ControlContext const &ctx, JointCommand &out) noexcept = 0;   // 只写 claims() 内的关节
     virtual void requestStop() noexcept = 0;             // 受控减速，之后以 Stopped 结束
@@ -311,12 +308,13 @@ struct ControlCycle {
     virtual void tick() noexcept = 0;
 };
 
-std::unique_ptr<ControlCycle> makeControlCycle(ControlCycleDeps const &deps, ControlCycleConfig const &config);
+// 驱动必须支持阻抗指令：所有控制器都输出 JointCommand
+Expected<std::unique_ptr<ControlCycle>> makeControlCycle(RobotProfile const &profile, ControlCycleDeps const &deps);
 
 }
 ```
 
-没有被任何控制器占用的关节由 `HoldController` 填充，保证每个关节每周期都有指令。内置控制器：
+没有被任何控制器占用的关节由控制周期内置的保持逻辑填充，保证每个关节每周期都有指令。内置控制器：
 
 | 控制器 | 用途 |
 |---|---|
@@ -474,14 +472,14 @@ CO2_END
 
 ### 6.4 larm_hal
 
-- 职责：5.2 中的接口；`TransmissionTable`（方向、零点偏置、线性比例，覆盖夹爪的弧度 ↔ 米）与传动适配器；`MonotonicTimeline`（`clock_nanosleep` 绝对时刻，记录超时周期）；用于测试的 `FakeDriver`。
-- 验证：传动换算的单元测试（含刚度、阻尼在比例下的换算）；`FakeDriver` 用于控制层测试。
+- 职责：5.2 中的接口；`MonotonicTimeline`（`clock_nanosleep` 绝对时刻，记录错过的周期）；`IdealBackend`（关节每周期精确到达指令位置，可注入反馈丢失），用于控制层测试；第 4 步加入 `TransmissionTable`（方向、零点偏置、线性比例，覆盖夹爪的弧度 ↔ 米）与传动适配器。
+- 验证：`MonotonicTimeline` 与 `IdealBackend` 的单元测试；传动换算加入后补充其单元测试（含刚度、阻尼在比例下的换算）。
 
 ### 6.5 larm_control
 
 - 职责：5.3、5.4 中的控制器、安全层、`ControlCycle`；`RealtimeRunner`（RAII：构造时建线程并设置调度策略、绑核、锁内存，析构时停止并 join，统计唤醒延迟和超时周期）。
 - 每周期的模型缓存：`ModelCache` 在每周期用当前 `q` 更新一次（FK、工具帧雅可比、重力力矩），控制器与安全层共用。
-- 验证：在 `FakeDriver` 和 MuJoCo 后端上的确定性测试：阶跃与轨迹跟踪误差在界内、限位与限幅生效、超时停止、故障锁存与复位、控制器占用冲突被拒绝。
+- 验证：在 `IdealBackend` 和 MuJoCo 后端上的确定性测试：轨迹跟踪误差在界内、限位与限幅生效、取消时平滑减速、故障锁存与复位、控制器占用冲突被拒绝；替换 `malloc` 的测试保证运行中的控制周期不做堆分配。
 
 ### 6.6 larm_sim
 
@@ -613,43 +611,10 @@ struct VectorEnvironment {
 
 机器人相关的内容全部是数据和启动文件，代码都在框架内：
 
-- `rebot_b601_description`：URDF、网格、MJCF。MJCF 由同一份 URDF 编译后补充：力矩型执行器（`ctrlrange` 等于力矩上限）、关节 `armature` / `damping` / `frictionloss`（摩擦取标定值）、两指的 `equality joint` 耦合、相邻连杆的接触排除；桌面与物体放在单独的场景文件中，引用机器人文件。
+- `rebot_b601_description`：`scripts/generate_description.py` 按固定提交拉取上游 URDF 与网格（上游仓库没有许可证文件、网格共 64 MB，因此不入库），用 MuJoCo 的 `compile` 转为 MJCF 后补充：以控制关节命名的力矩型执行器、关节 `armature` / `damping` / `frictionloss`（摩擦取标定值，其余为估计值）、两指的 `equality joint` 耦合、碰撞分组（机器人几何体之间不接触，自碰撞留给规划阶段检查）；地面放在单独的场景文件中。输出写入被忽略的 `generated/`。MuJoCo 写出的 MJCF 只保留 6 位有效数字，因此与 URDF 的位姿、重力项相差约 1e-6。
 - `rebot_b601_bringup`：配置文件、launch（真机、仿真、Studio）、RViz 配置；MoveIt 配置在需要时补充。
 
-配置文件示意（`待定` 项需要标定或实测）：
-
-```yaml
-robot: rebot_b601_rs
-description:
-  urdf: package://rebot_b601_description/urdf/rebot_b601_rs.urdf
-  mjcf: package://rebot_b601_description/mjcf/rebot_b601_rs_scene.xml
-control:
-  period_us: 4000
-joints:
-  - {name: joint1, position: [-2.8, 2.8], effort: 36.0, velocity: 待定, gains: {kp: 50.0, kd: 3.0}}
-  - {name: joint2, position: [0.0, 3.14], effort: 36.0, velocity: 待定, gains: {kp: 150.0, kd: 10.0}}
-  # joint3 … joint6 同理
-  - {name: gripper, unit: meter, position: [0.0, 待定], effort: 待定, gains: {kp: 50.0, kd: 4.0}}
-groups:
-  arm: {joints: [joint1, joint2, joint3, joint4, joint5, joint6], base: base_link, tool: gripper_end}
-  gripper: {joints: [gripper]}
-safety:
-  feedback_timeout_cycles: 待定
-  stream_timeout_ms: 待定
-  tracking_error_limit: 待定
-  rest_pose: [0, 0, 0, 0, 0, 0, 0]
-driver:
-  type: robstride_socketcan
-  interface: can0
-  host_id: 0xFD
-  motor_timeout_ms: 待定
-  actuators:
-    - {joint: joint1, id: 0x01, model: rs-06}
-    # joint2、joint3 为 rs-06；joint4 … joint6 为 rs-00
-    - {joint: gripper, id: 0x07, model: rs-00, transmission: {type: linear, meters_per_radian: 待定}}
-sim:
-  timestep_us: 500
-```
+配置文件为 `robots/rebot_b601/rebot_b601_bringup/config/rebot_b601_rs.yaml`。其中位置与力矩限值取自 URDF，增益取自 reBotArm_control_py；速度、加速度、加加速度限值是保守初值；夹爪的电机到位移换算、夹爪增益和电机侧超时还需要标定或实测。
 
 该机械臂没有抱闸，失能后会在重力下落下。因此：失能只在停放姿态（q=0，夹爪由桌面支撑）执行；故障反应默认是保持而不是失能；主机失联时只能依靠电机侧 CAN 超时，该功能需要在 RobStride 手册中确认，不支持时只剩物理支撑和断电急停。同一框架换成 B601-DM（达妙电机）时，新增一个达妙驱动和一份配置即可，其余不变。
 
@@ -657,26 +622,31 @@ sim:
 
 ```text
 lrebot_arm/
-  larm/                        # 一个 CMake 工程，同时是一个 ament 包
-    core/  model/  motion/  hal/  control/  sim/
-    drivers/robstride/
-    runtime/  ros/  studio/  learning/  python/
-    apps/                      # 组合根：larm_runtime_node、larm_studio、larm_sim_cli、larm_driver_probe
+  larm/                        # 一个 CMake 工程，后续同时作为 ament 包
+    core/ model/ motion/ hal/ control/ sim/      # 已实现
+    apps/sim_cli/                                # 已实现
+    tests/                                       # 跨模块集成测试
+    drivers/robstride/ runtime/ ros/ studio/ learning/ python/
+    apps/                      # 其余组合根：larm_runtime_node、larm_studio、larm_driver_probe
   larm_msgs/                   # rosidl 接口包
   robots/rebot_b601/
-    rebot_b601_description/
-    rebot_b601_bringup/
+    rebot_b601_description/    # scripts/generate_description.py → generated/
+    rebot_b601_bringup/        # config/rebot_b601_rs.yaml
+  tools/fetch_mujoco.sh
   deps.repos                   # lexec、co2、lrclexec、lqtexec 的固定提交
   docs/
 ```
 
 - 选择一个 CMake 工程加多个目标，而不是每个模块一个 ament 包：lexec 目前没有安装导出，跨包共享同一个 lexec 提供者很麻烦；单工程内可以在顶层先提供 `lexec::lexec`，再加入 lrclexec、lqtexec 与 co2，保证全程序只有一个提供者。模块边界由目标依赖保证。
-- 选项：`LARM_WITH_ROS`、`LARM_WITH_QT`、`LARM_WITH_PYTHON`、`LARM_WITH_ONNX`。训练机器可以只构建核心、仿真与训练模块。
-- 外部依赖来源：先用父工程或本地源码目录（与 lrclexec、lqtexec 现有做法一致），否则 FetchContent 拉取固定提交；`CMakePresets.json` 提供 debug、asan、tsan、release 配置；编译警告按项目 C++ 风格开启。
+- 仓库根目录不放 CMakeLists.txt：colcon 会把它识别为一个包，不再向下发现 `larm_msgs` 等子包。
+- 模块是 STATIC 库：OBJECT 库的目标文件不会沿依赖链传递到最终链接。
+- 选项：已有 `LARM_WITH_MUJOCO`；后续加入 `LARM_WITH_ROS`、`LARM_WITH_QT`、`LARM_WITH_PYTHON`、`LARM_WITH_ONNX`。训练机器可以只构建核心、仿真与训练模块。
+- 外部依赖来源：先用父工程或本地源码目录（与 lrclexec、lqtexec 现有做法一致），否则 FetchContent 拉取固定提交。Pinocchio 与 Ruckig 来自 ROS 安装目录，构建前需要 source ROS 环境。
+- `CMakePresets.json` 提供 debug、release、asan、tsan；sanitizer 预设使用 Clang，因为 MuJoCo 3.8 的 `mjsan.h` 在 GCC 13 下不合法。编译警告按项目 C++ 风格开启并视为错误。
 
 ## 9 验证策略
 
-确定性模块用单元测试锁定行为：core、model、motion、hal 的传动、control（在 FakeDriver 与快速仿真上）、RobStride 编解码、runtime 的 sender 语义、learning 的确定性重放。
+确定性模块用单元测试锁定行为：core、model、motion、hal 的传动、control（在 IdealBackend 与快速仿真上）、RobStride 编解码、runtime 的 sender 语义、learning 的确定性重放。
 
 依赖真实环境的模块用独立的开发入口验证：
 
@@ -690,7 +660,7 @@ lrebot_arm/
 
 每一步都产出可以运行和验证的纵向切片：
 
-1. **核心与仿真闭环**：core、model、motion、hal、control、sim、`larm_sim_cli`。完成标准：在 MuJoCo 中确定性地跑完一条轨迹，各项测试通过，URDF 与 MJCF 一致性测试通过。
+1. **核心与仿真闭环**（已完成）：core、model、motion、hal、control、sim、`larm_sim_cli`。完成标准：在 MuJoCo 中确定性地跑完一条轨迹，各项测试通过，URDF 与 MJCF 一致性测试通过。另有测试保证控制周期运行时不做堆分配。
 2. **运行时与 ROS 2**：runtime、msgs、ros。完成标准：仿真后端下 FollowJointTrajectory、MoveToPose、夹爪、急停、抢占在 `launch_testing` 中通过；RViz 显示正常。
 3. **Studio**：视口、会话、关节、笛卡尔、轨迹面板。完成标准：脚本模式走通主要流程。
 4. **真机**：RobStride 驱动，按"只读 → 使能保持 → 单关节小幅运动 → 慢速轨迹"逐级上真机；实测总线负载与周期抖动，确定控制频率。

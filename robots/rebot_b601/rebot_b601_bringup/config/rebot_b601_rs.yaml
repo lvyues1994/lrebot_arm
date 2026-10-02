@@ -1,0 +1,66 @@
+# reBot B601-RS 机器人配置。相对路径以本文件所在目录为基准。
+# 描述文件由 rebot_b601_description/scripts/generate_description.py 生成。
+robot: rebot_b601_rs
+
+description:
+  urdf: ../../rebot_b601_description/generated/urdf/rebot_b601_rs.urdf
+  mjcf: ../../rebot_b601_description/generated/mjcf/scene.xml
+
+control:
+  period_us: 4000
+
+# 位置与力矩限值取自 URDF；速度、加速度、加加速度是保守初值，待实测后调整。
+# 刚度与阻尼取自 reBotArm_control_py 的 MIT 默认增益。
+joints:
+  - name: joint1
+    limits: {position: [-2.8, 2.8], velocity: 2.0, acceleration: 5.0, jerk: 50.0, effort: 36.0}
+    gains: {stiffness: 50.0, damping: 3.0}
+  - name: joint2
+    limits: {position: [0.0, 3.14], velocity: 2.0, acceleration: 5.0, jerk: 50.0, effort: 36.0}
+    gains: {stiffness: 150.0, damping: 10.0}
+  - name: joint3
+    limits: {position: [0.0, 3.14], velocity: 2.0, acceleration: 5.0, jerk: 50.0, effort: 36.0}
+    gains: {stiffness: 150.0, damping: 10.0}
+  - name: joint4
+    limits: {position: [-1.57, 1.57], velocity: 3.0, acceleration: 8.0, jerk: 80.0, effort: 14.0}
+    gains: {stiffness: 50.0, damping: 5.0}
+  - name: joint5
+    limits: {position: [-1.57, 1.57], velocity: 3.0, acceleration: 8.0, jerk: 80.0, effort: 14.0}
+    gains: {stiffness: 50.0, damping: 4.0}
+  - name: joint6
+    limits: {position: [-3.14, 3.14], velocity: 3.0, acceleration: 8.0, jerk: 80.0, effort: 14.0}
+    gains: {stiffness: 50.0, damping: 4.0}
+  # 夹爪以单指位移（米）表示，对应描述中的 joint_left。电机转角到位移的换算待标定，增益为仿真值。
+  - name: gripper
+    description_joint: joint_left
+    unit: meter
+    limits: {position: [0.0, 0.05], velocity: 0.05, acceleration: 0.5, jerk: 5.0, effort: 20.0}
+    gains: {stiffness: 2000.0, damping: 40.0}
+
+groups:
+  arm: {joints: [joint1, joint2, joint3, joint4, joint5, joint6], base: base_link, tool: gripper_end}
+  gripper: {joints: [gripper]}
+
+safety:
+  limit_tolerance: 0.05
+  feedback_timeout_cycles: 3
+  tracking_error_limit: {radian: 0.3, meter: 0.02}
+  enable_ramp_ms: 500
+  # q=0 为伸展姿态，夹爪由桌面支撑；该机械臂无抱闸，只在此姿态失能。
+  rest_pose: [0, 0, 0, 0, 0, 0, 0]
+
+sim:
+  physics_step_us: 500
+
+driver:
+  type: robstride_socketcan
+  interface: can0
+  host_id: 0xFD
+  actuators:
+    - {joint: joint1, id: 0x01, model: rs-06}
+    - {joint: joint2, id: 0x02, model: rs-06}
+    - {joint: joint3, id: 0x03, model: rs-06}
+    - {joint: joint4, id: 0x04, model: rs-00}
+    - {joint: joint5, id: 0x05, model: rs-00}
+    - {joint: joint6, id: 0x06, model: rs-00}
+    - {joint: gripper, id: 0x07, model: rs-00}
