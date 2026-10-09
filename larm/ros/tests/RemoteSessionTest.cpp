@@ -145,6 +145,17 @@ TEST_F(RemoteSessionTest, ReportsFailuresWithTheirReason) {
     EXPECT_EQ(error.reason, MotionFailure::InvalidGoal) << error.what();
 }
 
+TEST_F(RemoteSessionTest, ReportsTheReasonAgainWhenTheSameGoalFailsAgain) {
+    auto beyond = armTarget(0.0);
+    beyond[1] = -0.5;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        auto const error = expectMotionError(remote().motion("arm")->moveToJoints({.position = beyond}));
+        EXPECT_EQ(error.reason, MotionFailure::InvalidGoal) << "attempt " << attempt << ": " << error.what();
+        EXPECT_NE(std::string{error.what()}.find("joint2"), std::string::npos)
+            << "attempt " << attempt << ": " << error.what();
+    }
+}
+
 TEST_F(RemoteSessionTest, EmergencyStopsAndResets) {
     remote().emergencyStop();
     EXPECT_TRUE(

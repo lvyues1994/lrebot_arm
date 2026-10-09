@@ -5,6 +5,7 @@ robot: rebot_b601_rs
 description:
   urdf: ../generated/urdf/rebot_b601_rs.urdf
   mjcf: ../generated/mjcf/scene.xml
+  srdf: ../generated/srdf/rebot_b601_rs.srdf
 
 control:
   period_us: 4000
@@ -46,7 +47,7 @@ safety:
   feedback_timeout_cycles: 3
   tracking_error_limit: {radian: 0.3, meter: 0.02}
   enable_ramp_ms: 500
-  # q=0 为伸展姿态，夹爪由桌面支撑；该机械臂无抱闸，只在此姿态失能。
+  # q=0 为折叠姿态：大臂、小臂压在各自的下限上，腕部靠在大臂上；该机械臂无抱闸，只在此姿态失能。
   rest_pose: [0, 0, 0, 0, 0, 0, 0]
 
 sim:

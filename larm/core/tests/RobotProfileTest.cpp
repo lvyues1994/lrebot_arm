@@ -49,6 +49,7 @@ TEST(RobotProfile, ParsesValidProfile) {
     ASSERT_TRUE(profile) << profile.error().message;
     EXPECT_EQ(profile->name, "test_arm");
     EXPECT_EQ(profile->urdf, std::filesystem::path{"/base/robot.urdf"});
+    EXPECT_TRUE(profile->srdf.empty());
     EXPECT_EQ(profile->controlPeriod, std::chrono::milliseconds{2});
     ASSERT_EQ(profile->dof(), 2u);
     EXPECT_EQ(profile->joints[0].descriptionJoint, "a");
@@ -64,6 +65,13 @@ TEST(RobotProfile, ParsesValidProfile) {
     EXPECT_FALSE(profile->findJoint("missing"));
     EXPECT_EQ(profile->sim.node["physics_step_us"].as<int>(), 500);
     EXPECT_TRUE(profile->driver.node.IsNull());
+}
+
+TEST(RobotProfile, ResolvesSrdfNextToTheProfile) {
+    auto const profile = parseRobotProfile(
+        replace(kValidProfile, "mjcf: scene.xml}", "mjcf: scene.xml, srdf: ../robot.srdf}"), "/base/config");
+    ASSERT_TRUE(profile) << profile.error().message;
+    EXPECT_EQ(profile->srdf, std::filesystem::path{"/base/robot.srdf"});
 }
 
 TEST(RobotProfile, RejectsUnknownKey) {
@@ -118,6 +126,7 @@ TEST(RobotProfile, LoadsRebotProfile) {
     EXPECT_EQ(profile->groups[*arm].toolFrame, "gripper_end");
     EXPECT_EQ(profile->urdf.filename(), "rebot_b601_rs.urdf");
     EXPECT_TRUE(profile->urdf.is_absolute());
+    EXPECT_EQ(profile->srdf.filename(), "rebot_b601_rs.srdf");
 }
 
 } // namespace

@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <string>
 #include <string_view>
 
 namespace larm::model {
@@ -64,6 +65,29 @@ struct IkSolver {
     virtual IkSolution solve(IkRequest const &request, JointVector const &seed) = 0;
 };
 
+// Two links whose collision geometry overlaps.
+struct LinkContact {
+    std::string first;
+    std::string second;
+    // Penetration depth in meters.
+    double depth{};
+};
+
+// How much deeper than allowed two links may overlap before they collide, in meters.
+inline constexpr double kContactTolerance = 1e-3;
+
+// Self-collision queries owned by one thread; not real-time. Every pair of links is checked except
+// links adjacent in the kinematic tree and pairs the profile's SRDF disables.
+struct CollisionChecker {
+    virtual ~CollisionChecker() = default;
+    // Contacts present at `position` may stay as deep as they are there, so a motion may leave a
+    // resting contact (a folded arm lying on itself) but not press further into it. Until the first
+    // call no overlap is allowed.
+    virtual void allowContactsAt(JointVector const &position) = 0;
+    // A contact more than kContactTolerance deeper than allowed at `position`, if any.
+    virtual std::optional<LinkContact> collision(JointVector const &position) = 0;
+};
+
 // A parsed robot model that hands out evaluators; each evaluator belongs to one thread.
 struct RobotModel {
     virtual ~RobotModel() = default;
@@ -71,10 +95,12 @@ struct RobotModel {
     virtual std::unique_ptr<Kinematics> makeKinematics() const = 0;
     virtual std::unique_ptr<Dynamics> makeDynamics() const = 0;
     virtual std::unique_ptr<IkSolver> makeIkSolver() const = 0;
+    virtual std::unique_ptr<CollisionChecker> makeCollisionChecker() const = 0;
 };
 
 // Builds the model from the profile's URDF. Every profile joint must exist in the URDF under its
-// description name; URDF joints absent from the profile are locked at their neutral position.
+// description name; URDF joints absent from the profile are locked at their neutral position, except
+// mimic joints, which follow their leader. Collision meshes must be convex.
 Expected<std::unique_ptr<RobotModel>> loadRobotModel(RobotProfile const &profile);
 
 } // namespace larm::model

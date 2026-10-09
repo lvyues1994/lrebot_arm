@@ -247,11 +247,15 @@ RobotProfile parseProfileNode(YAML::Node const &root, std::filesystem::path cons
     profile.name = requiredScalar<std::string>(root, "", "robot");
 
     auto const description = required(root, "", "description");
-    requireKeys(description, "description", {"urdf", "mjcf"});
+    requireKeys(description, "description", {"urdf", "mjcf", "srdf"});
     profile.urdf =
         resolvePath(baseDirectory, requiredScalar<std::string>(description, "description", "urdf"));
     profile.mjcf =
         resolvePath(baseDirectory, requiredScalar<std::string>(description, "description", "mjcf"));
+    if (description["srdf"]) {
+        profile.srdf =
+            resolvePath(baseDirectory, requiredScalar<std::string>(description, "description", "srdf"));
+    }
 
     auto const control = required(root, "", "control");
     requireKeys(control, "control", {"period_us"});

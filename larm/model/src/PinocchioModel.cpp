@@ -1,4 +1,5 @@
 #include "DampedLeastSquaresIk.h"
+#include "PinocchioCollision.h"
 
 #include <larm/model/RobotModel.h>
 
@@ -115,7 +116,9 @@ struct PinocchioDynamics final : Dynamics {
 };
 
 struct PinocchioRobotModel final : RobotModel {
-    explicit PinocchioRobotModel(std::shared_ptr<ModelData const> shared_) : shared{std::move(shared_)} {}
+    PinocchioRobotModel(std::shared_ptr<ModelData const> shared_,
+                        std::shared_ptr<CollisionGeometry const> collisionGeometry_)
+        : shared{std::move(shared_)}, collisionGeometry{std::move(collisionGeometry_)} {}
 
     std::size_t dof() const noexcept override { return shared->dof; }
 
@@ -131,8 +134,13 @@ struct PinocchioRobotModel final : RobotModel {
         return makeDampedLeastSquaresIk(makeKinematics(), shared->limits);
     }
 
+    std::unique_ptr<CollisionChecker> makeCollisionChecker() const override {
+        return makePinocchioCollisionChecker(collisionGeometry);
+    }
+
   private:
     std::shared_ptr<ModelData const> shared;
+    std::shared_ptr<CollisionGeometry const> collisionGeometry;
 };
 
 Expected<pinocchio::Model> parseUrdf(std::filesystem::path const &urdf) {
@@ -187,11 +195,17 @@ Expected<std::shared_ptr<ModelData const>> reduceToProfile(pinocchio::Model cons
 } // namespace
 
 Expected<std::unique_ptr<RobotModel>> loadRobotModel(RobotProfile const &profile) {
-    return parseUrdf(profile.urdf)
-        .and_then([&](pinocchio::Model const &full) { return reduceToProfile(full, profile); })
-        .map([](std::shared_ptr<ModelData const> shared) -> std::unique_ptr<RobotModel> {
-            return std::make_unique<PinocchioRobotModel>(std::move(shared));
-        });
+    auto shared = parseUrdf(profile.urdf).and_then([&](pinocchio::Model const &full) {
+        return reduceToProfile(full, profile);
+    });
+    if (not shared) {
+        return tl::make_unexpected(shared.error());
+    }
+    auto collisionGeometry = loadCollisionGeometry(profile);
+    if (not collisionGeometry) {
+        return tl::make_unexpected(collisionGeometry.error());
+    }
+    return std::make_unique<PinocchioRobotModel>(std::move(*shared), std::move(*collisionGeometry));
 }
 
 } // namespace larm::model

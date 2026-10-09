@@ -146,6 +146,7 @@ struct RuntimeNodeImpl final : RuntimeNode {
         {
             auto const lock = std::lock_guard{errorMutex};
             message.last_error = lastError;
+            message.error_count = errorCount;
         }
         status->publish(message);
     }
@@ -154,6 +155,7 @@ struct RuntimeNodeImpl final : RuntimeNode {
         RCLCPP_WARN(node->get_logger(), "%s failed: %s", what.c_str(), message.c_str());
         auto const lock = std::lock_guard{errorMutex};
         lastError = what + ": " + message;
+        ++errorCount;
     }
 
     // Records why a request was rejected before it reached the session, then rejects it.
@@ -320,6 +322,7 @@ struct RuntimeNodeImpl final : RuntimeNode {
     std::int64_t ticks{};
     std::mutex errorMutex;
     std::string lastError;
+    std::uint32_t errorCount{};
 };
 
 // Publishes joint states, the clock and the status until the scope stops it.

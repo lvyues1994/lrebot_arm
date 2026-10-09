@@ -112,6 +112,50 @@ TEST_F(LocalRuntimeTest, RejectsUnreachablePosesAndInvalidGoals) {
               MotionFailure::InvalidGoal);
 }
 
+TEST_F(LocalRuntimeTest, TakesTargetsJustPastALimitToBeOnIt) {
+    ASSERT_TRUE(run(session->park()));
+    // A joint resting on its limit may measure slightly past it, and a path may start there.
+    JointVector onLimit = profile.safety.restPose.head(6);
+    onLimit[1] = -0.01;
+    auto path = JointPath{};
+    path.waypoints.push_back({.time = std::chrono::seconds{1}, .position = onLimit});
+    path.waypoints.push_back({.time = std::chrono::seconds{3}, .position = armTarget(0.0)});
+    EXPECT_TRUE(run(arm->followPath(std::move(path))));
+
+    auto const result = run(arm->moveToJoints({.position = onLimit}));
+    ASSERT_TRUE(result);
+    EXPECT_NEAR(std::get<0>(*result).position[1], 0.0, 0.02);
+}
+
+TEST_F(LocalRuntimeTest, RejectsTargetsFarPastALimitSayingWhichAndWhere) {
+    auto beyond = armTarget(0.0);
+    beyond[1] = -0.2;
+    auto const error = expectMotionError(arm->moveToJoints({.position = beyond}));
+    EXPECT_EQ(error.reason, MotionFailure::InvalidGoal);
+    EXPECT_NE(std::string{error.what()}.find("'joint2' target -0.200 is outside its limits [0.000, 3.140]"),
+              std::string::npos)
+        << error.what();
+}
+
+TEST_F(LocalRuntimeTest, RefusesToPressTheWristIntoTheArm) {
+    ASSERT_TRUE(run(session->park()));
+    JointVector lowered = profile.safety.restPose.head(6);
+    lowered[3] = -0.85;
+    auto const error = expectMotionError(arm->moveToJoints({.position = lowered}));
+    EXPECT_EQ(error.reason, MotionFailure::PlanningFailed);
+    EXPECT_NE(std::string{error.what()}.find("self-collision"), std::string::npos) << error.what();
+    EXPECT_NE(std::string{error.what()}.find("link5"), std::string::npos) << error.what();
+    std::this_thread::sleep_for(std::chrono::milliseconds{200});
+    EXPECT_NEAR(session->latest().state.joints.position[3], 0.0, 0.02);
+}
+
+TEST_F(LocalRuntimeTest, ParksWithTheWristTurnedCloseToTheFoldedArm) {
+    auto near = JointVector{6};
+    near << -0.212, 0.0, 0.343, 0.142, -0.542, -0.416;
+    ASSERT_TRUE(run(arm->moveToJoints({.position = near})));
+    EXPECT_TRUE(run(session->park()));
+}
+
 TEST_F(LocalRuntimeTest, FollowsATimedPathFromTheCurrentPosition) {
     auto path = JointPath{};
     auto middle = armTarget(0.3);

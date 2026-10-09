@@ -162,7 +162,8 @@ struct RemoteSessionImpl final : runtime::RobotSession {
     }
 
     // Sends a goal once its server is discovered. An abort carries no reason, so after it the session
-    // waits for the server's next status and reports the error it recorded, when it recorded a new one.
+    // waits for the server's next status and reports the error it recorded, when it recorded another
+    // one since the goal was sent (possibly with the same text).
     // The trailing let_error also re-sends errors as rvalues: lrclexec completes with lvalue errors,
     // which a type-erased receiver rejects.
     template <class Result, class Action, class Map>
@@ -175,7 +176,7 @@ struct RemoteSessionImpl final : runtime::RobotSession {
                    return lrclexec::execute_action(scheduler, client, goal);
                }) |
                lexec::then(std::move(map)) |
-               lexec::let_error([this, before = lastError()](auto const &error) {
+               lexec::let_error([this, before = errorCount()](auto const &error) {
                    return lrclexec::schedule_after(scheduler, kStatusGrace) |
                           lexec::let_value([this, error, before] {
                               return lexec::just_error(exceptionFor(error, before));
@@ -200,24 +201,25 @@ struct RemoteSessionImpl final : runtime::RobotSession {
                lexec::let_error([](std::exception_ptr const &error) { return lexec::just_error(error); });
     }
 
-    std::string lastError() const {
+    std::uint32_t errorCount() const {
         auto const lock = std::lock_guard{mutex};
-        return lastReportedError;
+        return reportedErrors;
     }
 
-    static std::exception_ptr exceptionFor(std::exception_ptr const &error, std::string const &) {
-        return error;
-    }
+    static std::exception_ptr exceptionFor(std::exception_ptr const &error, std::uint32_t) { return error; }
 
     template <class Action>
     std::exception_ptr exceptionFor(lrclexec::ActionError<Action> const &error,
-                                    std::string const &before) const {
+                                    std::uint32_t const before) const {
         if (error.kind == lrclexec::ActionErrorKind::rejected) {
             return std::make_exception_ptr(
                 MotionError{MotionFailure::Fault, control::FaultCode::None, "the runtime rejected the goal"});
         }
-        auto const reported = lastError();
-        if (reported != before and not reported.empty()) {
+        auto const reported = [&] {
+            auto const lock = std::lock_guard{mutex};
+            return reportedErrors != before ? lastReportedError : std::string{};
+        }();
+        if (not reported.empty()) {
             auto const colon = reported.find(": ");
             return std::make_exception_ptr(
                 fromMessage(colon == std::string::npos ? reported : reported.substr(colon + 2)));
@@ -266,6 +268,7 @@ struct RemoteSessionImpl final : runtime::RobotSession {
             snapshot.state.actuators[i].enabled = message.enabled;
         }
         lastReportedError = message.last_error;
+        reportedErrors = message.error_count;
     }
 
     rclcpp::Node::SharedPtr node;
@@ -280,6 +283,7 @@ struct RemoteSessionImpl final : runtime::RobotSession {
     mutable std::mutex mutex;
     control::RobotSnapshot snapshot;
     std::string lastReportedError;
+    std::uint32_t reportedErrors{};
 };
 
 RemoteMotion::RemoteMotion(RemoteSessionImpl *const session_, GroupJoints joints_, JointGroupSpec const &spec,

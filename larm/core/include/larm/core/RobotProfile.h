@@ -60,6 +60,8 @@ struct RobotProfile {
     std::string name;
     std::filesystem::path urdf;
     std::filesystem::path mjcf;
+    // Link pairs whose collisions are not checked (disable_collisions); empty when the profile has none.
+    std::filesystem::path srdf;
     Duration controlPeriod{};
     std::vector<JointSpec> joints;
     std::vector<JointGroupSpec> groups;

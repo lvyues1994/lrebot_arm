@@ -1,6 +1,7 @@
 #include <larm/motion/Planning.h>
 
 #include <algorithm>
+#include <cmath>
 #include <vector>
 
 namespace larm::motion {
@@ -101,6 +102,24 @@ bool hasSize(std::optional<JointVector> const &vector, std::size_t const dof) {
     return not vector or (dofOf(*vector) == dof and vector->allFinite());
 }
 
+// Velocity at an interior waypoint from its neighbours, limited (Fritsch–Carlson) so that the cubic
+// segments on either side stay between their end positions: zero where the joint turns or pauses.
+JointVector interiorVelocity(TimedWaypoint const &before, TimedWaypoint const &at,
+                             TimedWaypoint const &after) {
+    JointVector const incoming = (at.position - before.position) / toSeconds(at.time - before.time);
+    JointVector const outgoing = (after.position - at.position) / toSeconds(after.time - at.time);
+    JointVector velocity = (after.position - before.position) / toSeconds(after.time - before.time);
+    for (Eigen::Index j = 0; j < velocity.size(); ++j) {
+        if (incoming[j] * outgoing[j] <= 0.0) {
+            velocity[j] = 0.0;
+        } else {
+            auto const bound = 3.0 * std::min(std::abs(incoming[j]), std::abs(outgoing[j]));
+            velocity[j] = std::clamp(velocity[j], -bound, bound);
+        }
+    }
+    return velocity;
+}
+
 } // namespace
 
 Expected<std::shared_ptr<JointTrajectory const>>
@@ -129,8 +148,7 @@ interpolateWaypoints(std::span<TimedWaypoint const> const waypoints) {
         if (waypoint.velocity) {
             velocity = *waypoint.velocity;
         } else if (i > 0 and i + 1 < waypoints.size()) {
-            velocity = (waypoints[i + 1].position - waypoints[i - 1].position) /
-                       toSeconds(waypoints[i + 1].time - waypoints[i - 1].time);
+            velocity = interiorVelocity(waypoints[i - 1], waypoint, waypoints[i + 1]);
         }
         trajectory->knots.push_back(Knot{
             .time = toSeconds(waypoint.time),

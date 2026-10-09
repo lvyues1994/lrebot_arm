@@ -38,8 +38,9 @@ struct TimedWaypoint {
 };
 
 // Piecewise polynomial through the waypoints: quintic on segments whose ends carry velocities and
-// accelerations, cubic Hermite otherwise. Missing velocities come from neighbouring waypoints and are
-// zero at both ends. The first waypoint must be at time zero and times must increase.
+// accelerations, cubic Hermite otherwise. Missing velocities come from neighbouring waypoints, limited
+// so that no joint overshoots a waypoint, and are zero at both ends. The first waypoint must be at time
+// zero and times must increase.
 Expected<std::shared_ptr<JointTrajectory const>>
 interpolateWaypoints(std::span<TimedWaypoint const> waypoints);
 

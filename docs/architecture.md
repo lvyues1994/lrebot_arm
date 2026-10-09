@@ -460,17 +460,20 @@ CO2_END
   - `Kinematics`：`frame(name) -> optional<FrameId>`（冷路径，取一次 ID）；`update(q)`；`framePose(FrameId)`；`frameJacobian(FrameId, Eigen::Ref<Matrix6X>)`。按名字查询只在初始化时发生。
   - `Dynamics`：`gravity(q, out)`、`inverseDynamics(q, dq, ddq, out)`、`massMatrix(q, out)`；结果写入调用方的缓冲区，不分配。
   - `IkSolver`：`solve(IkRequest const &, std::span<double const> seed, IkSolution &out) -> IkStatus`；首个实现为带关节限位的 Levenberg–Marquardt，多初值。
-  - `CollisionChecker`：自碰撞与环境基本体的距离、碰撞查询；用于规划阶段校验轨迹。
+  - `CollisionChecker`（已实现自碰撞，环境基本体待加）：`allowContactsAt(q)` 记下起点已有的接触深度，`collision(q)` 返回比允许深度再深 1 mm 以上的第一对连杆。这样运动可以离开静止接触（折叠的手臂靠在自己身上），但不能压得更深，也不能产生新的接触。用于规划阶段校验轨迹。
 - 实现：Pinocchio（运动学、动力学）与 Coal（碰撞），隐藏在工厂函数后面。臂的模型由 URDF 去掉夹爪关节后得到。动力学参数可由配置覆盖 URDF 惯性参数。
-- 验证：雅可比与数值差分对比；Pinocchio 与 MuJoCo 在随机构型下的 FK 一致性测试（同时检查 URDF 与 MJCF 是否一致）。
+- 碰撞几何：完整 URDF（mimic 关节跟随主动关节，两指一起开合）上的碰撞网格，一个连杆可以有多个。网格必须是凸的，加载时校验，再转成 Coal 的凸体，用 GJK/EPA 求带符号距离（先用各凸体的世界轴对齐包围盒剔除分开的对）。不检查的连杆对：连杆树中相邻的连杆，以及配置中 `description.srdf` 列出的 `disable_collisions`。reBot 的 71 个凸体下，Release 每个构型约 35 µs（停放姿态附近）到 70 µs（随机构型）。
+- 验证：雅可比与数值差分对比；Pinocchio 与 MuJoCo 在随机构型下的 FK 一致性测试（同时检查 URDF 与 MJCF 是否一致）；自碰撞：停放姿态无碰撞（夹爪开合皆然），腕部下压、折叠手臂翻向底座判为碰撞，允许的接触可以保持、不能加深。
 
 ### 6.3 larm_motion
 
 - 职责：轨迹类型、轨迹生成、规划。
 - 接口：`JointTrajectory`：`duration()`、`sample(t, JointSample &out) const noexcept`（位置、速度、加速度）；对象不可变，实时侧求值不分配。
 - 实现：`RuckigTrajectory`（多关节同步、限加加速度的点到点）；`WaypointTrajectory`（多路点 + 时间参数化）；笛卡尔直线在非实时侧用 IK 稠密采样转成关节轨迹。
+  - `WaypointTrajectory` 中路点未给出的速度由相邻路点求出，并按 Fritsch–Carlson 条件限幅：关节在路点处转向或停顿时速度取 0。这样每段都落在两端路点之间，路点不超限，路径就不超限。否则，以当前位置作为第一个路点时，第一段会先反向冲出去，在限位上的关节会被带出限位。
+- `findCollision(trajectory, checker, step)`：从轨迹起点允许已有接触，按每个关节的最大步长（转动关节 0.02 rad，夹爪 2 mm）采样整条轨迹做自碰撞检查，返回第一次碰撞的连杆对与时刻。
 - `MotionPlanner`（非实时）：目标 → IK → 碰撞检查 → 时间参数化 → `JointTrajectory`。全局避障规划需要时交给 MoveIt，MoveIt 输出经 FollowJointTrajectory 回到本框架执行。
-- 验证：限值（速度、加速度、加加速度）、端点、连续性的单元测试。
+- 验证：限值（速度、加速度、加加速度）、端点、连续性的单元测试；路径不越过相邻路点；轨迹扫描的步长、首次碰撞与短运动终点。
 
 ### 6.4 larm_hal
 
@@ -491,7 +494,7 @@ CO2_END
 - 职责：MuJoCo 后端。
 - `MujocoWorld`：持有 `mjModel` 与 `mjData`，按配置把关节名、执行器名绑定到 MuJoCo ID，加载场景物体。不做模型随机化时，多个世界共享同一个只读 `mjModel`；做随机化时每个世界持有自己的模型副本。
 - `ActuatorModel`：把 `JointCommand` 转成关节力矩，在每个物理子步计算 MIT 律、力矩饱和、可选的指令延迟和量化。MJCF 中执行器为力矩型 `motor`。
-- `SimulatedRobot`：实现 `RobotDriver`、`RealtimeIo` 和仿真 `Timeline`。`advance()` 执行一个控制周期内的全部物理子步（默认物理步长 0.5 ms，控制周期 4 ms 时为 8 步），节流策略为"按实时倍率"或"不节流"。失能时力矩为 0，可以在仿真中验证掉臂与安全反应。
+- `SimulatedRobot`：实现 `RobotDriver`、`RealtimeIo` 和仿真 `Timeline`。`advance()` 执行一个控制周期内的全部物理子步（默认物理步长 0.5 ms，控制周期 4 ms 时为 8 步），节流策略为"按实时倍率"或"不节流"。失能时力矩为 0，可以在仿真中验证掉臂与安全反应；机器人连杆之间有接触（第 7 节），所以停放姿态下失能时手臂与实物一样保持折叠。
 - `SceneMirror`（第 3 步实现）：Studio 侧的显示用世界，持有自己的 `mjModel` 与 `mjData`，不做物理。把配置关节的位置写入 `qpos`，按 MJCF 中 `equality joint` 的多项式补出耦合关节（`joint_right`），再 `mj_forward`。机器人姿态由 `/joint_states` 即可还原；整个世界的 `qpos` 快照留到场景中有可动物体时再加入。
 - 相机：离屏渲染（EGL）在独立线程中进行，用自己的 `mjData` 副本。
 - 随机化 `Randomizer`：在 reset 时扰动质量与质心、关节摩擦、增益、延迟、传感器噪声；默认范围参考重力标定结果（质量 ±10%，库仑摩擦 0.2–0.5 N·m）。
@@ -539,10 +542,12 @@ CO2_END
 - 职责：5.5 中 `RobotSession`、`MotionApi`、`GripperApi` 的本地实现，入口为 `startLocalRuntime(profile, backend, options)`。
 - 组成：
   - 本地会话：持有后端、模型、`ControlCycle`、`RealtimeRunner`、协调器和规划线程池（lexec `static_thread_pool`）。析构顺序为停实时线程 → 关协调器（仍在进行的操作以 `Shutdown` 失败）→ 释放线程池。
-  - 规划：IK、目标校验在线程池上完成；不合法的目标在这里以 `MotionError` 拒绝。
+  - 规划：IK、目标校验在线程池上完成；不合法的目标在这里以 `MotionError` 拒绝。关节目标和路点超出限位不超过 `safety.limit_tolerance` 时夹到限位上，因为停在限位上的关节实测值可能略微越过限位，而实测值本身就是合理的目标（例如路径面板的"添加当前位置"）；超出更多时拒绝，并报出关节、目标值与限位。
   - 协调器：唯一的实时请求生产者（加锁串行化多个调用线程）。每 2 ms 排空实时事件，按关节重叠处理抢占：运行中的旧目标先受控停止，尚在等待的旧目标直接以 stopped 结束。控制器在激活时才由 `ControllerFactory` 按当时的指令状态构造，所以被抢占后会从停稳的位置重新规划。
+  - 自碰撞：点到点、路径与停放的轨迹在激活时生成后，用 `findCollision` 整条检查；会碰撞时目标以 `planning_failed` 失败，报出连杆对、重叠深度和时刻，机械臂不动。检查在协调器的锁内进行（一段 2 rad 的运动约 100 次查询、几毫秒），所以检查器只有一个，由各工厂共用。
+  - 停放是关节空间的直线式运动，不绕行。腕部偏航较大、小臂又折叠时，直接回停放姿态会让腕部擦过大臂（实物网格同样如此），停放以 `planning_failed` 拒绝，需要先抬起小臂再停放。在停放姿态附近的随机构型中约有 1.5%–3.5% 属于这种情况；能自动绕行的规划留待以后。
   - sender：`GoalSender`、`WaitSender` 的操作状态由 `shared_ptr` 持有，接收者只取一次；停止回调只登记取消，所有完成都在协调器线程上投递。
-- 验证：以 MuJoCo 后端为底座的 12 个 sender 语义测试（关节、位姿、路径、夹爪、取消、抢占、手臂与夹爪并行、急停与复位、停放后失能、关闭时失败），在 ASan/UBSan 与 TSan 下重复运行。
+- 验证：以 MuJoCo 后端为底座的 16 个 sender 语义测试（关节、位姿、路径、夹爪、取消、抢占、手臂与夹爪并行、急停与复位、停放后失能、关闭时失败、限位附近的目标、远超限位的目标、自碰撞、腕部转向时停放），在 ASan/UBSan 与 TSan 下重复运行。
 
 ### 6.9 larm_msgs 与 larm_ros
 
@@ -565,14 +570,14 @@ CO2_END
 | 服务 | `~/enable`、`~/disable`、`~/park`、`~/reset_fault`、`~/emergency_stop` | `std_srvs/Trigger`（完成后才应答） |
 
 - Action 服务端用 lrclexec 的 `make_action_server_preempt`，工厂直接返回 `MotionApi` 的 sender。`/joint_states` 使用描述中的关节名（夹爪为 `joint_left`，`joint_right` 由 URDF 的 mimic 推出）；仿真时与 `/clock` 一样以仿真时间打戳。状态发布是一个 co2 协程循环，`CO2_AWAIT` lrclexec 的定时 sender（非 lexec 命名空间的 sender 需经 `lexec::coro::as_awaitable`）。
-- 失败原因：lrclexec 的服务端在 error 时以空 result 中止，因此原因写入节点日志与 `~/status` 的 `last_error`。若希望 Action result 本身带错误码，需要 lrclexec 支持"带 result 的 abort"。
+- 失败原因：lrclexec 的服务端在 error 时以空 result 中止，因此原因写入节点日志与 `~/status` 的 `last_error`，同时 `error_count` 加一。若希望 Action result 本身带错误码，需要 lrclexec 支持"带 result 的 abort"。
 - 收束：`SignalStop` 触发停止 → 关闭各 Action 服务端 → `spin_with_scope` 排空 scope → 析构节点与会话；遵守 lrclexec 的约束（不在执行器回调中阻塞等待依赖同一执行器的 sender；Action 客户端与服务端活到执行器停止之后）。
 - 远程会话 `makeRemoteSession(node, profile, options)`（第 3 步实现）：`RobotSession` 的 ROS 实现，Studio 用它操作运行时节点。
   - 快照由 `/joint_states` 与 `~/status` 的订阅拼成（关节、使能、反馈新鲜度、安全状态、故障、运行中的组）。
   - 服务用 `call_service`，运动与夹爪用 `execute_action`。服务端尚未发现时立即以 `MotionError` 失败，不会无限等待。停止请求经 lrclexec 取消远端目标。`emergencyStop()` 只发出请求、不等应答。强制失能不对远程开放。
-  - 失败原因：服务端以 `"<原因>: <详情>"` 回报，客户端还原为 `MotionFailure`。Action 中止时不带原因，客户端等待 200 ms（长于状态发布周期），再从 `~/status` 的 `last_error` 读取。
+  - 失败原因：服务端以 `"<原因>: <详情>"` 回报，客户端还原为 `MotionFailure`。Action 中止时不带原因，客户端等待 200 ms（长于状态发布周期），再从 `~/status` 的 `last_error` 读取。是否是这次目标的错误看 `error_count` 是否比发出目标时大，而不是看文本是否变化，所以同一个错误连续出现时也能报出原因。
   - lrclexec 的 `call_service`、`execute_action` 以左值 `exception_ptr` 完成 `set_error`，而声明的签名是 `set_error_t(std::exception_ptr)`，类型擦除的接收者因此不接受。远程会话在末尾用 `let_error(just_error)` 转成右值；这一点应在 lrclexec 中修正。
-- 验证：进程内集成测试经 DDS 驱动节点（11 个场景：关节状态、使能、FollowJointTrajectory、MoveToJoints、MoveToPose、GripperCommand、无效目标、抢占、取消、急停与复位、停放后失能）；远程会话另有 9 个测试，与运行时节点在同一进程内经 DDS 通信，每个测试套件使用独立的 DDS 域；另以 launch 启动仿真做命令行冒烟验证与 Ctrl+C 收束验证。
+- 验证：进程内集成测试经 DDS 驱动节点（11 个场景：关节状态、使能、FollowJointTrajectory、MoveToJoints、MoveToPose、GripperCommand、无效目标、抢占、取消、急停与复位、停放后失能）；远程会话另有 10 个测试，与运行时节点在同一进程内经 DDS 通信，每个测试套件使用独立的 DDS 域；另以 launch 启动仿真做命令行冒烟验证与 Ctrl+C 收束验证。
 
 ### 6.10 larm_studio
 
@@ -657,7 +662,14 @@ struct VectorEnvironment {
 
 机器人相关的内容全部是数据和启动文件，代码都在框架内。它们合在一个 ament 包 `robots/rebot_b601` 里：配置文件按相对路径引用描述文件，拆成两个包后在 colcon 默认的分包安装布局下路径会断开。
 
-- 描述：`scripts/generate_description.py` 按固定提交拉取上游 URDF 与网格（上游仓库没有许可证文件、网格共 64 MB，因此不入库），用 MuJoCo 的 `compile` 转为 MJCF 后补充：以控制关节命名的力矩型执行器、关节 `armature` / `damping` / `frictionloss`（摩擦取标定值，其余为估计值）、两指的 `equality joint` 耦合、碰撞分组（机器人几何体之间不接触，自碰撞留给规划阶段检查）；地面放在单独的场景文件中；最终 URDF 中 `joint_right` 声明为 `joint_left` 的 mimic（编译 MJCF 之后才加，避免 MuJoCo 再生成一条耦合约束）。输出写入被忽略的 `generated/`。MuJoCo 写出的 MJCF 只保留 6 位有效数字，因此与 URDF 的位姿、重力项相差约 1e-6。
+- 描述：`scripts/generate_description.py` 按固定提交拉取上游 URDF 与网格（上游仓库没有许可证文件、网格共 64 MB，因此不入库），用 MuJoCo 的 `compile` 转为 MJCF 后补充：以控制关节命名的力矩型执行器、关节 `armature` / `damping` / `frictionloss`（摩擦取标定值，其余为估计值）、两指的 `equality joint` 耦合、自碰撞；地面放在单独的场景文件中；最终 URDF 中 `joint_right` 声明为 `joint_left` 的 mimic（编译 MJCF 之后才加，避免 MuJoCo 再生成一条耦合约束）。输出写入被忽略的 `generated/`。MuJoCo 写出的 MJCF 只保留 6 位有效数字，因此与 URDF 的位姿、重力项相差约 1e-6。
+- 碰撞几何：
+  - URDF 的每个碰撞网格换成若干凸体。上游的碰撞网格是 CAD 装配体，由几十到一百多个独立实体（板件、电机壳、螺钉）组成：每个实体一个凸包，从大到小处理，较小的实体若并入某个已有凸体后体积增长不到 5%，就并进去。reBot 共得到 71 个凸体（大臂 18、小臂 16、腕部 7 等）。
+  - 凸包用 scipy/Qhull 计算，顶点取单精度；对凸包顶点再做一次不合并面的求包，消除合并近似共面面片后留下的凹坑，写出前校验凸性。
+  - MuJoCo 本来就按凸体碰撞，所以仿真与规划用的是同一套几何。最初每个连杆只用一个凸包，在折叠的停放姿态附近太保守：小臂（link3）与腕部（link5）在停放姿态下实物网格相距 8.4 mm，单个凸包只差 2.6 mm。从停放姿态附近直接停放时，约 11%（各关节偏离 ±0.6 rad 内）到 43%（±1 rad 内）被误判为碰撞，Studio 验收中也因此停放失败。拆成实体凸体后，link3 与 link5 的误判消失，剩下的都是腕部与大臂之间的真实接触。
+  - `generated/srdf/rebot_b601_rs.srdf` 列出不检查的连杆对：URDF 中相邻的连杆，以及两指（闭合时互相接触，凸包重叠）。
+  - MJCF 中机器人几何体之间、与地面之间都接触，SRDF 中的连杆对用 `<contact><exclude>` 排除。MuJoCo 自己会跳过父子刚体的接触，但挂在世界上的刚体（`base_link`）除外，所以要显式排除。
+  - 依据：停放姿态下腕部（link5）与大臂（link2）只差 0.8 mm（原始网格），实物断电后正是靠这里撑住腕部，保持水平。原先机器人几何体之间不接触时，仿真失能后 joint4 在重力下垂到约 -0.85 rad，夹爪穿过底座落到地面。开启自碰撞后，仿真失能静止时腕部靠在大臂上，各关节偏离停放姿态不超过 0.005 rad，与实物一致（`RebotSimulation.DisabledArmStaysFoldedAtRest`）。仿真速度约为实时的 126 倍（机器人连杆之间不接触时为 313 倍）。
 - 启动：
   - `launch/sim.launch.py`：运行时节点 + `robot_state_publisher` + RViz；把 URDF 中的相对网格路径改写为 `file://` URI 供 RViz 使用。
   - `launch/studio.launch.py`：仿真加 Studio，关闭 Studio 即结束整个 launch。
@@ -674,7 +686,7 @@ struct VectorEnvironment {
 - 夹爪增益仍是仿真值：2000 N/m 换算到电机约 0.11 N·m/rad。实测静摩擦约 0.1 N·m（指尖约 13.6 N），这个刚度在真机上不够，需要在真机阶段整定。
 
 该机械臂没有抱闸，失能后会在重力下落下。由此有以下规则：
-- 失能只在停放姿态执行（q=0，夹爪由桌面支撑）；
+- 失能只在停放姿态执行（q=0：大臂、小臂压在各自的下限上，腕部靠在大臂上）；
 - 故障反应默认是保持而不是失能；单个执行器掉线时，其余执行器保持（6.5）；
 - 主机失联时，电机保持最后一条指令，除非配置了电机侧 CAN 超时；手册确认支持该超时（参数 0x7028，20000 = 1 s），超时后电机进入复位模式，机械臂会落下；
 - 剩下的手段只有物理支撑和断电急停。

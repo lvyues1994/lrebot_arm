@@ -16,3 +16,5 @@ string fault
 string[] active_groups
 # Why the most recent rejected or failed goal ended; empty if none has.
 string last_error
+# How many goals and requests have failed; tells a repeated error from the previous one.
+uint32 error_count

@@ -215,6 +215,12 @@ TEST_F(RuntimeNodeTest, AbortsInvalidGoalsAndReportsWhy) {
     EXPECT_THROW(world->execute(world->moveJoints, goal), lrclexec::ActionError<MoveToJoints>);
     std::this_thread::sleep_for(std::chrono::milliseconds{200});
     EXPECT_NE(world->status()->last_error.find("elbow"), std::string::npos) << world->status()->last_error;
+    auto const count = world->status()->error_count;
+    EXPECT_GE(count, 1u);
+
+    EXPECT_THROW(world->execute(world->moveJoints, goal), lrclexec::ActionError<MoveToJoints>);
+    std::this_thread::sleep_for(std::chrono::milliseconds{200});
+    EXPECT_EQ(world->status()->error_count, count + 1);
 }
 
 TEST_F(RuntimeNodeTest, NewGoalPreemptsTheRunningOne) {

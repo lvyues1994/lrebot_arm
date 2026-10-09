@@ -141,6 +141,24 @@ TEST_F(RebotSimulation, DisabledArmFallsUnderGravity) {
     EXPECT_GT((state.joints.position - start).head(6).cwiseAbs().maxCoeff(), 0.05);
 }
 
+// As on the real arm: unpowered at rest, the wrist lies on the upper arm instead of swinging down.
+TEST_F(RebotSimulation, DisabledArmStaysFoldedAtRest) {
+    auto sim = simulation();
+    ASSERT_NE(sim, nullptr);
+    auto const rest = profile.safety.restPose;
+    sim->reset(rest);
+    auto command = JointCommand::zero(profile.dof());
+    command.position = rest;
+    for (int cycle = 0; cycle < 500; ++cycle) {
+        sim->driver().io().write(command, DrivePower::Disabled);
+        sim->timeline().advance();
+    }
+    auto state = RobotState::zero(profile.dof());
+    sim->driver().io().read(state);
+    EXPECT_LT((state.joints.position - rest).head(6).cwiseAbs().maxCoeff(), 0.02)
+        << state.joints.position.transpose();
+}
+
 TEST_F(RebotSimulation, IsDeterministic) {
     auto first = simulation();
     auto second = simulation();

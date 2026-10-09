@@ -115,5 +115,59 @@ TEST_F(RebotModel, IkRecoversReachablePoses) {
     }
 }
 
+bool between(LinkContact const &contact, std::string const &a, std::string const &b) {
+    return (contact.first == a and contact.second == b) or (contact.first == b and contact.second == a);
+}
+
+TEST_F(RebotModel, RestPoseIsFreeOfCollisionsWithTheGripperOpenOrClosed) {
+    auto checker = model->makeCollisionChecker();
+    auto q = profile.safety.restPose;
+    EXPECT_FALSE(checker->collision(q));
+    q[6] = profile.joints[6].limits.upper;
+    EXPECT_FALSE(checker->collision(q));
+}
+
+TEST_F(RebotModel, WristLoweredIntoTheUpperArmCollides) {
+    auto checker = model->makeCollisionChecker();
+    auto q = profile.safety.restPose;
+    q[3] = -0.85;
+    auto const contact = checker->collision(q);
+    ASSERT_TRUE(contact);
+    EXPECT_TRUE(between(*contact, "link2", "link5") or between(*contact, "link1", "link5"))
+        << contact->first << " / " << contact->second;
+    EXPECT_GT(contact->depth, 0.005);
+}
+
+TEST_F(RebotModel, FoldedArmTippedOverTheBaseCollides) {
+    auto checker = model->makeCollisionChecker();
+    auto q = profile.safety.restPose;
+    q[1] = 1.6;
+    auto const contact = checker->collision(q);
+    ASSERT_TRUE(contact);
+    EXPECT_TRUE(contact->first == "base_link" or contact->second == "base_link")
+        << contact->first << " / " << contact->second;
+}
+
+TEST_F(RebotModel, AllowedContactMayPersistButNotDeepen) {
+    auto checker = model->makeCollisionChecker();
+    auto pressed = profile.safety.restPose;
+    pressed[3] = -0.03;
+    ASSERT_TRUE(checker->collision(pressed));
+
+    checker->allowContactsAt(pressed);
+    EXPECT_FALSE(checker->collision(pressed));
+    auto turned = pressed;
+    turned[0] = 1.0;
+    EXPECT_FALSE(checker->collision(turned));
+    auto lifted = pressed;
+    lifted[3] = 0.3;
+    EXPECT_FALSE(checker->collision(lifted));
+    auto deeper = pressed;
+    deeper[3] = -0.1;
+    auto const contact = checker->collision(deeper);
+    ASSERT_TRUE(contact);
+    EXPECT_TRUE(between(*contact, "link2", "link5")) << contact->first << " / " << contact->second;
+}
+
 } // namespace
 } // namespace larm::model

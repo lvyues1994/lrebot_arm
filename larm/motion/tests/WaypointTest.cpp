@@ -66,6 +66,32 @@ TEST(Waypoints, VelocityIsTheDerivativeOfPosition) {
     EXPECT_EQ(sample.velocity.norm(), 0.0);
 }
 
+TEST(Waypoints, StaysBetweenNeighbouringWaypoints) {
+    // A pause at the start, as when a path begins with the current position, then a turn.
+    auto const waypoints = std::vector<TimedWaypoint>{
+        {.time = Duration{0}, .position = vector2(0.0, 0.0)},
+        {.time = std::chrono::milliseconds{1500}, .position = vector2(0.0, 0.2)},
+        {.time = std::chrono::seconds{3}, .position = vector2(1.0, 1.0)},
+        {.time = std::chrono::milliseconds{3500}, .position = vector2(0.2, 1.05)},
+    };
+    auto const trajectory = interpolateWaypoints(waypoints);
+    ASSERT_TRUE(trajectory);
+    auto sample = JointSample::zero(2);
+    for (std::size_t segment = 0; segment + 1 < waypoints.size(); ++segment) {
+        auto const &from = waypoints[segment];
+        auto const &to = waypoints[segment + 1];
+        for (auto t = from.time; t <= to.time; t += std::chrono::milliseconds{5}) {
+            (*trajectory)->sample(t, sample);
+            for (Eigen::Index j = 0; j < 2; ++j) {
+                EXPECT_GE(sample.position[j], std::min(from.position[j], to.position[j]) - 1e-12)
+                    << "joint " << j << " at " << toSeconds(t) << " s";
+                EXPECT_LE(sample.position[j], std::max(from.position[j], to.position[j]) + 1e-12)
+                    << "joint " << j << " at " << toSeconds(t) << " s";
+            }
+        }
+    }
+}
+
 TEST(Waypoints, RejectsBadInput) {
     EXPECT_FALSE(interpolateWaypoints({}));
     auto const late =

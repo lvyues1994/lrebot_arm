@@ -8,7 +8,7 @@
 
 ```bash
 tools/fetch_mujoco.sh                                  # MuJoCo 3.8.0 → .deps/
-python3 robots/rebot_b601/scripts/generate_description.py   # URDF/MJCF → robots/rebot_b601/generated/
+python3 robots/rebot_b601/scripts/generate_description.py   # URDF/SRDF/MJCF → robots/rebot_b601/generated/（需要 python3-scipy）
 ```
 
 ## 核心模块：CMake 预设

@@ -5,6 +5,7 @@
 #include <larm/control/GripperController.h>
 #include <larm/control/JointTrajectoryController.h>
 #include <larm/model/RobotModel.h>
+#include <larm/motion/CollisionScan.h>
 #include <larm/motion/Planning.h>
 #include <larm/runtime/LocalRuntime.h>
 
@@ -12,12 +13,16 @@
 
 #include <algorithm>
 #include <cmath>
+#include <format>
 
 namespace larm::runtime {
 namespace {
 
 constexpr double kRestToleranceRadian = 0.05;
 constexpr Duration kResetTimeout = std::chrono::milliseconds{200};
+// Largest joint motion between two self-collision checks of a trajectory.
+constexpr double kCollisionStepRadian = 0.02;
+constexpr double kCollisionStepMeter = 0.002;
 
 [[noreturn]] void reject(MotionFailure const reason, std::string const &message) {
     throw MotionError{reason, control::FaultCode::None, message};
@@ -46,16 +51,51 @@ JointVector withGroupValues(JointGroupSpec const &group, JointVector full, Joint
     return full;
 }
 
-void requireWithinLimits(RobotProfile const &profile, JointMask const &joints, JointVector const &position) {
-    for (std::size_t i = 0; i < profile.dof(); ++i) {
-        auto const &limits = profile.joints[i].limits;
-        if (joints.test(i) and (not std::isfinite(position[idx(i)]) or position[idx(i)] < limits.lower or
-                                position[idx(i)] > limits.upper)) {
+// A group target with values past a limit by at most the safety tolerance moved onto the limit: a
+// joint resting on its limit may measure slightly past it, and its measured position is a fair target.
+JointVector withinLimits(RobotProfile const &profile, JointGroupSpec const &group, JointVector values) {
+    auto const tolerance = profile.safety.limitTolerance;
+    for (std::size_t i = 0; i < group.joints.size(); ++i) {
+        auto const &joint = profile.joints[group.joints[i]];
+        auto &value = values[idx(i)];
+        if (not std::isfinite(value) or value < joint.limits.lower - tolerance or
+            value > joint.limits.upper + tolerance) {
             reject(MotionFailure::InvalidGoal,
-                   "joint '" + profile.joints[i].name + "' target is outside its limits");
+                   std::format("joint '{}' target {:.3f} is outside its limits [{:.3f}, {:.3f}]", joint.name,
+                               value, joint.limits.lower, joint.limits.upper));
+        }
+        value = std::clamp(value, joint.limits.lower, joint.limits.upper);
+    }
+    return values;
+}
+
+// Checks planned trajectories for self-collision. Only controller factories use it, and the
+// coordinator runs those under its lock.
+struct CollisionGuard {
+    CollisionGuard(RobotProfile const &profile, model::RobotModel const &model)
+        : checker{model.makeCollisionChecker()}, step{zeroJointVector(profile.dof())} {
+        for (std::size_t i = 0; i < profile.dof(); ++i) {
+            step[idx(i)] =
+                profile.joints[i].unit == JointUnit::Meter ? kCollisionStepMeter : kCollisionStepRadian;
         }
     }
-}
+
+    Expected<void> check(motion::JointTrajectory const &trajectory) {
+        auto const collision = motion::findCollision(trajectory, *checker, step);
+        if (not collision) {
+            return {};
+        }
+        auto const &contact = collision->contact;
+        return makeError(
+            ErrorCode::InvalidArgument,
+            std::format("self-collision: {} and {} would overlap by {:.1f} mm {:.2f} s into the motion",
+                        contact.first, contact.second, contact.depth * 1e3,
+                        std::chrono::duration<double>{collision->time}.count()));
+    }
+
+    std::unique_ptr<model::CollisionChecker> checker;
+    JointVector step;
+};
 
 double requireSpeed(double const speed) {
     if (not(speed > 0.0 and speed <= 1.0)) {
@@ -80,9 +120,9 @@ trajectoryController(RobotProfile const &profile, std::shared_ptr<motion::JointT
 }
 
 // A rest-to-rest motion of `joints` to `target`, planned from the commanded state at activation.
-detail::ControllerFactory pointToPoint(RobotProfile const &profile, JointMask const joints,
-                                       JointVector const target, double const speed) {
-    return [&profile, joints, target,
+detail::ControllerFactory pointToPoint(RobotProfile const &profile, CollisionGuard &collisions,
+                                       JointMask const joints, JointVector const target, double const speed) {
+    return [&profile, &collisions, joints, target,
             speed](control::RobotSnapshot const &snapshot) -> Expected<std::unique_ptr<control::Controller>> {
         auto start = motion::JointSample::zero(profile.dof());
         start.position = snapshot.command.position;
@@ -92,6 +132,9 @@ detail::ControllerFactory pointToPoint(RobotProfile const &profile, JointMask co
                                                           .joints = joints});
         if (not trajectory) {
             return tl::make_unexpected(trajectory.error());
+        }
+        if (auto checked = collisions.check(**trajectory); not checked) {
+            return tl::make_unexpected(checked.error());
         }
         return trajectoryController(profile, *trajectory, joints);
     };
@@ -125,7 +168,7 @@ struct LocalRuntime final : RobotSession {
     LocalRuntime(RobotProfile profile_, std::unique_ptr<model::RobotModel> model_,
                  std::unique_ptr<hal::Backend> backend_, std::unique_ptr<control::RuntimeChannels> channels_,
                  std::unique_ptr<control::ControlCycle> cycle_, RuntimeOptions const &options_)
-        : options{options_}, robot{std::move(profile_)}, model{std::move(model_)},
+        : options{options_}, robot{std::move(profile_)}, model{std::move(model_)}, collisions{robot, *model},
           backend{std::move(backend_)}, channels{std::move(channels_)}, cycle{std::move(cycle_)},
           coordinator{std::make_unique<detail::Coordinator>(*channels, options.eventPeriod)},
           pool{std::make_unique<lexec::static_thread_pool>(options.planningThreads)},
@@ -196,7 +239,7 @@ struct LocalRuntime final : RobotSession {
         auto const rest = robot.safety.restPose;
         return planned<MotionResult>([this, all, rest] {
             return detail::GoalPlan<MotionResult>{
-                .request = {.joints = all, .makeController = pointToPoint(robot, all, rest, 0.5)},
+                .request = {.joints = all, .makeController = pointToPoint(robot, collisions, all, rest, 0.5)},
                 .result = [](control::RobotSnapshot const &snapshot) {
                     return MotionResult{.position = snapshot.state.joints.position};
                 }};
@@ -257,6 +300,7 @@ struct LocalRuntime final : RobotSession {
     RuntimeOptions options;
     RobotProfile robot;
     std::unique_ptr<model::RobotModel> model;
+    CollisionGuard collisions;
     std::unique_ptr<hal::Backend> backend;
     std::unique_ptr<control::RuntimeChannels> channels;
     std::unique_ptr<control::ControlCycle> cycle;
@@ -267,14 +311,15 @@ struct LocalRuntime final : RobotSession {
     std::vector<std::unique_ptr<GroupGripper>> grippers;
 };
 
-detail::GoalPlan<MotionResult> jointPlan(LocalRuntime const &runtime, std::size_t const group,
+detail::GoalPlan<MotionResult> jointPlan(LocalRuntime &runtime, std::size_t const group,
                                          JointVector const &target, double const speed) {
     auto const &spec = runtime.robot.groups[group];
     auto const joints = maskOf(spec);
-    auto const full = withGroupValues(spec, runtime.latest().command.position, target);
-    requireWithinLimits(runtime.robot, joints, full);
+    auto const full =
+        withGroupValues(spec, runtime.latest().command.position, withinLimits(runtime.robot, spec, target));
     return detail::GoalPlan<MotionResult>{
-        .request = {.joints = joints, .makeController = pointToPoint(runtime.robot, joints, full, speed)},
+        .request = {.joints = joints,
+                    .makeController = pointToPoint(runtime.robot, runtime.collisions, joints, full, speed)},
         .result = [spec](control::RobotSnapshot const &snapshot) {
             return MotionResult{.position = groupValues(spec, snapshot.state.joints.position)};
         }};
@@ -318,19 +363,19 @@ Async<MotionResult> GroupMotion::followPath(JointPath path) {
             reject(MotionFailure::InvalidGoal, "the path has no waypoints");
         }
         auto const width = spec.joints.size();
-        for (auto const &waypoint : path.waypoints) {
+        auto bounded = path;
+        for (auto &waypoint : bounded.waypoints) {
             if (dofOf(waypoint.position) != width or
                 (waypoint.velocity and dofOf(*waypoint.velocity) != width) or
                 (waypoint.acceleration and dofOf(*waypoint.acceleration) != width)) {
                 reject(MotionFailure::InvalidGoal, "a waypoint has the wrong number of values");
             }
-            requireWithinLimits(runtime->robot, joints,
-                                withGroupValues(spec, runtime->robot.safety.restPose, waypoint.position));
+            waypoint.position = withinLimits(runtime->robot, spec, waypoint.position);
         }
         auto const &robot = runtime->robot;
         auto factory =
-            [&robot, spec, joints,
-             path](control::RobotSnapshot const &snapshot) -> Expected<std::unique_ptr<control::Controller>> {
+            [&robot, &collisions = runtime->collisions, spec, joints, path = std::move(bounded)](
+                control::RobotSnapshot const &snapshot) -> Expected<std::unique_ptr<control::Controller>> {
             auto const current = snapshot.command.position;
             auto const expand = [&](JointVector const &values) {
                 return withGroupValues(spec, current, values);
@@ -357,6 +402,9 @@ Async<MotionResult> GroupMotion::followPath(JointPath path) {
             auto const trajectory = motion::interpolateWaypoints(waypoints);
             if (not trajectory) {
                 return tl::make_unexpected(trajectory.error());
+            }
+            if (auto checked = collisions.check(**trajectory); not checked) {
+                return tl::make_unexpected(checked.error());
             }
             return trajectoryController(robot, *trajectory, joints);
         };
