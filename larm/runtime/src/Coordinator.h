@@ -30,9 +30,10 @@ struct GoalListener {
     virtual void finished(GoalOutcome const &outcome) noexcept = 0;
 };
 
-// Builds the controller from the robot state at activation, which a preempted goal delays.
-using ControllerFactory =
-    std::function<Expected<std::unique_ptr<control::Controller>>(control::RobotSnapshot const &)>;
+// Builds the controller from the robot state at activation, which a preempted goal delays. Its error
+// fails the goal.
+using ControllerFactory = std::function<tl::expected<std::unique_ptr<control::Controller>, MotionError>(
+    control::RobotSnapshot const &)>;
 
 struct GoalRequest {
     JointMask joints;

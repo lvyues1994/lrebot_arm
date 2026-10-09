@@ -199,6 +199,30 @@ TEST_F(RuntimeNodeTest, MovesToAPose) {
     EXPECT_LT((kinematics->framePose(tool).translation - pose.translation).norm(), 0.01);
 }
 
+TEST_F(RuntimeNodeTest, MovesRelativeToTheToolAlongALine) {
+    auto model = model::loadRobotModel(world->profile());
+    ASSERT_TRUE(model);
+    auto kinematics = (*model)->makeKinematics();
+    auto const tool = *kinematics->findFrame("gripper_end");
+    auto const commandedTool = [&] {
+        kinematics->update(world->session().latest().command.position);
+        return kinematics->framePose(tool);
+    };
+    auto const start = commandedTool();
+
+    auto goal = MoveToPose::Goal{};
+    goal.target.header.frame_id = "gripper_end";
+    goal.target.pose.position.z = -0.03;
+    goal.target.pose.orientation.w = 1.0;
+    goal.linear = true;
+    ASSERT_TRUE(world->execute(world->movePose, goal));
+    auto const expected = start * Pose3{.translation = Eigen::Vector3d{0.0, 0.0, -0.03}};
+    EXPECT_LT((commandedTool().translation - expected.translation).norm(), 1e-3);
+
+    goal.target.header.frame_id = "link3";
+    EXPECT_THROW(world->execute(world->movePose, goal), lrclexec::ActionError<MoveToPose>);
+}
+
 TEST_F(RuntimeNodeTest, GripsThroughGripperCommand) {
     auto goal = GripperCommand::Goal{};
     goal.command.position = 0.04;

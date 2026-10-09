@@ -50,9 +50,25 @@ struct JointGoal {
     double speed = 1.0;
 };
 
-// Pose of the group's tool frame in its base frame.
+enum class Frame : std::uint8_t {
+    // The group's base frame.
+    Base,
+    // The group's tool center point (TCP) where the motion starts, as commanded then.
+    Tool,
+};
+
+enum class PathShape : std::uint8_t {
+    // Joint-space point-to-point to an IK solution.
+    Joint,
+    // The TCP along a straight line, turning at a matching rate; needs the group's Cartesian limits.
+    Linear,
+};
+
+// Pose of the group's TCP, expressed in `frame`: with Frame::Tool it is a move relative to the TCP.
 struct PoseGoal {
     Pose3 target;
+    Frame frame = Frame::Base;
+    PathShape path = PathShape::Joint;
     double speed = 1.0;
 };
 

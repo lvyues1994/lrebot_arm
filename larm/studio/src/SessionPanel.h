@@ -12,7 +12,7 @@
 
 namespace larm::studio {
 
-// Power, safety and the emergency stop.
+// Power, safety, the emergency stop, and the rest and ready poses.
 struct SessionPanel final : QWidget {
     explicit SessionPanel(StudioContext const &context_, QWidget *parent = nullptr);
 
@@ -20,6 +20,8 @@ struct SessionPanel final : QWidget {
 
     QPushButton *enableButton() const { return enable; }
     QPushButton *parkButton() const { return park; }
+    // Null when the profile has no "ready" pose.
+    QPushButton *readyButton() const { return ready; }
     QPushButton *disableButton() const { return disable; }
     QPushButton *resetButton() const { return reset; }
     QPushButton *emergencyStopButton() const { return emergencyStop; }
@@ -28,6 +30,7 @@ struct SessionPanel final : QWidget {
     StudioContext context;
     QPushButton *enable{};
     QPushButton *park{};
+    QPushButton *ready{};
     QPushButton *disable{};
     QPushButton *reset{};
     QPushButton *stop{};

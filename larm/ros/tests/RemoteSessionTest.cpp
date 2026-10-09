@@ -109,6 +109,24 @@ TEST_F(RemoteSessionTest, MovesToAPose) {
     EXPECT_LT((kinematics->framePose(tool).translation - target.translation).norm(), 0.01);
 }
 
+TEST_F(RemoteSessionTest, MovesTheToolCenterPointRelativeToItselfAlongALine) {
+    auto model = model::loadRobotModel(remote().profile());
+    ASSERT_TRUE(model);
+    auto kinematics = (*model)->makeKinematics();
+    auto const &arm = remote().profile().groups[*remote().profile().findGroup("arm")];
+    auto const tool = *kinematics->findFrame(arm.toolFrame);
+    auto const &session = *world->server->session;
+    auto const commandedTcp = [&] {
+        kinematics->update(session.latest().command.position);
+        return kinematics->framePose(tool) * arm.tcp;
+    };
+    auto const start = commandedTcp();
+    auto const step = Pose3{.translation = Eigen::Vector3d{0.0, 0.0, -0.03}};
+    ASSERT_TRUE(lexec::sync_wait(remote().motion("arm")->moveToPose(
+        {.target = step, .frame = runtime::Frame::Tool, .path = runtime::PathShape::Linear})));
+    EXPECT_LT((commandedTcp().translation - (start * step).translation).norm(), 1e-3);
+}
+
 TEST_F(RemoteSessionTest, FollowsAPath) {
     auto path = runtime::JointPath{};
     path.waypoints.push_back({.time = std::chrono::seconds{1}, .position = armTarget(0.0)});

@@ -71,6 +71,7 @@ struct RemoteMotion final : runtime::MotionApi {
     RemoteSessionImpl *session;
     GroupJoints joints;
     std::string baseFrame;
+    std::string toolFrame;
     ActionClient<MoveToJoints> moveJoints;
     ActionClient<MoveToPose> movePose;
     ActionClient<FollowJointTrajectory> follow;
@@ -288,7 +289,7 @@ struct RemoteSessionImpl final : runtime::RobotSession {
 
 RemoteMotion::RemoteMotion(RemoteSessionImpl *const session_, GroupJoints joints_, JointGroupSpec const &spec,
                            rclcpp::Node &node, std::string const &prefix)
-    : session{session_}, joints{std::move(joints_)}, baseFrame{spec.baseFrame},
+    : session{session_}, joints{std::move(joints_)}, baseFrame{spec.baseFrame}, toolFrame{spec.toolFrame},
       moveJoints{rclcpp_action::create_client<MoveToJoints>(&node, prefix + "/move_to_joints")},
       movePose{rclcpp_action::create_client<MoveToPose>(&node, prefix + "/move_to_pose")},
       follow{
@@ -307,7 +308,8 @@ runtime::Async<runtime::MotionResult> RemoteMotion::moveToJoints(runtime::JointG
 
 runtime::Async<runtime::MotionResult> RemoteMotion::moveToPose(runtime::PoseGoal goal) {
     auto message = MoveToPose::Goal{};
-    message.target.header.frame_id = baseFrame;
+    message.target.header.frame_id = goal.frame == runtime::Frame::Tool ? toolFrame : baseFrame;
+    message.linear = goal.path == runtime::PathShape::Linear;
     message.target.pose.position.x = goal.target.translation.x();
     message.target.pose.position.y = goal.target.translation.y();
     message.target.pose.position.z = goal.target.translation.z();

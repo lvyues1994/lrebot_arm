@@ -6,6 +6,7 @@
 #include <larm/control/JointTrajectoryController.h>
 #include <larm/model/RobotModel.h>
 #include <larm/motion/CollisionScan.h>
+#include <larm/motion/LinearMotion.h>
 #include <larm/motion/Planning.h>
 #include <larm/runtime/LocalRuntime.h>
 
@@ -24,8 +25,14 @@ constexpr Duration kResetTimeout = std::chrono::milliseconds{200};
 constexpr double kCollisionStepRadian = 0.02;
 constexpr double kCollisionStepMeter = 0.002;
 
+using FactoryResult = tl::expected<std::unique_ptr<control::Controller>, MotionError>;
+
 [[noreturn]] void reject(MotionFailure const reason, std::string const &message) {
     throw MotionError{reason, control::FaultCode::None, message};
+}
+
+tl::unexpected<MotionError> failure(MotionFailure const reason, std::string const &message) {
+    return tl::make_unexpected(MotionError{reason, control::FaultCode::None, message});
 }
 
 JointMask maskOf(JointGroupSpec const &group) {
@@ -80,14 +87,14 @@ struct CollisionGuard {
         }
     }
 
-    Expected<void> check(motion::JointTrajectory const &trajectory) {
+    tl::expected<void, MotionError> check(motion::JointTrajectory const &trajectory) {
         auto const collision = motion::findCollision(trajectory, *checker, step);
         if (not collision) {
             return {};
         }
         auto const &contact = collision->contact;
-        return makeError(
-            ErrorCode::InvalidArgument,
+        return failure(
+            MotionFailure::PlanningFailed,
             std::format("self-collision: {} and {} would overlap by {:.1f} mm {:.2f} s into the motion",
                         contact.first, contact.second, contact.depth * 1e3,
                         std::chrono::duration<double>{collision->time}.count()));
@@ -95,6 +102,30 @@ struct CollisionGuard {
 
     std::unique_ptr<model::CollisionChecker> checker;
     JointVector step;
+};
+
+struct GroupFrames {
+    model::FrameId base;
+    model::FrameId tool;
+};
+
+// Resolves and plans pose goals. Only controller factories use it, and the coordinator runs those
+// under its lock.
+struct PosePlanner {
+    PosePlanner(RobotProfile const &profile, model::RobotModel const &model)
+        : kinematics{model.makeKinematics()}, solver{model.makeIkSolver()} {
+        for (auto const &group : profile.groups) {
+            auto const base = kinematics->findFrame(group.baseFrame);
+            auto const tool = kinematics->findFrame(group.toolFrame);
+            frames.push_back(base and tool ? std::optional{GroupFrames{.base = *base, .tool = *tool}}
+                                           : std::nullopt);
+        }
+    }
+
+    std::unique_ptr<model::Kinematics> kinematics;
+    std::unique_ptr<model::IkSolver> solver;
+    // By group; empty for groups whose frames are not in the model.
+    std::vector<std::optional<GroupFrames>> frames;
 };
 
 double requireSpeed(double const speed) {
@@ -119,24 +150,80 @@ trajectoryController(RobotProfile const &profile, std::shared_ptr<motion::JointT
     });
 }
 
+// A rest-to-rest motion of `joints` to `target` from the commanded state in `snapshot`.
+FactoryResult jointMotion(RobotProfile const &profile, CollisionGuard &collisions,
+                          control::RobotSnapshot const &snapshot, JointMask const &joints,
+                          JointVector const &target, double const speed) {
+    auto start = motion::JointSample::zero(profile.dof());
+    start.position = snapshot.command.position;
+    auto const trajectory = motion::planPointToPoint(
+        {.start = start, .target = target, .limits = motion::motionLimits(profile, speed), .joints = joints});
+    if (not trajectory) {
+        return failure(MotionFailure::PlanningFailed, trajectory.error().message);
+    }
+    if (auto checked = collisions.check(**trajectory); not checked) {
+        return tl::make_unexpected(checked.error());
+    }
+    return trajectoryController(profile, *trajectory, joints);
+}
+
 // A rest-to-rest motion of `joints` to `target`, planned from the commanded state at activation.
 detail::ControllerFactory pointToPoint(RobotProfile const &profile, CollisionGuard &collisions,
                                        JointMask const joints, JointVector const target, double const speed) {
-    return [&profile, &collisions, joints, target,
-            speed](control::RobotSnapshot const &snapshot) -> Expected<std::unique_ptr<control::Controller>> {
-        auto start = motion::JointSample::zero(profile.dof());
-        start.position = snapshot.command.position;
-        auto const trajectory = motion::planPointToPoint({.start = start,
-                                                          .target = target,
-                                                          .limits = motion::motionLimits(profile, speed),
-                                                          .joints = joints});
-        if (not trajectory) {
-            return tl::make_unexpected(trajectory.error());
+    return [&profile, &collisions, joints, target, speed](control::RobotSnapshot const &snapshot) {
+        return jointMotion(profile, collisions, snapshot, joints, target, speed);
+    };
+}
+
+CartesianLimits scaled(CartesianLimits const &limits, double const speed) {
+    return CartesianLimits{.linearVelocity = speed * limits.linearVelocity,
+                           .linearAcceleration = speed * limits.linearAcceleration,
+                           .angularVelocity = speed * limits.angularVelocity,
+                           .angularAcceleration = speed * limits.angularAcceleration};
+}
+
+// A motion of the group's TCP to `goal`, resolved against the commanded state at activation.
+detail::ControllerFactory poseMotion(RobotProfile const &profile, PosePlanner &planner,
+                                     CollisionGuard &collisions, std::size_t const group,
+                                     PoseGoal const goal) {
+    return [&profile, &planner, &collisions, group,
+            goal](control::RobotSnapshot const &snapshot) -> FactoryResult {
+        auto const &spec = profile.groups[group];
+        auto const &frames = *planner.frames[group];
+        auto const joints = maskOf(spec);
+        auto const &start = snapshot.command.position;
+        planner.kinematics->update(start);
+        auto const target = goal.frame == Frame::Tool
+                                ? planner.kinematics->framePose(frames.tool) * spec.tcp * goal.target
+                                : planner.kinematics->framePose(frames.base) * goal.target;
+        if (goal.path == PathShape::Linear) {
+            auto const trajectory =
+                motion::planLinear({.start = start,
+                                    .target = target,
+                                    .tool = frames.tool,
+                                    .tcp = spec.tcp,
+                                    .joints = joints,
+                                    .cartesian = scaled(*spec.cartesianLimits, goal.speed),
+                                    .limits = motion::motionLimits(profile, goal.speed)},
+                                   *planner.kinematics, *planner.solver);
+            if (not trajectory) {
+                return failure(trajectory.error().code == ErrorCode::SolverFailed
+                                   ? MotionFailure::Unreachable
+                                   : MotionFailure::PlanningFailed,
+                               trajectory.error().message);
+            }
+            if (auto checked = collisions.check(**trajectory); not checked) {
+                return tl::make_unexpected(checked.error());
+            }
+            return trajectoryController(profile, *trajectory, joints);
         }
-        if (auto checked = collisions.check(**trajectory); not checked) {
-            return tl::make_unexpected(checked.error());
+        auto const solution = planner.solver->solve(
+            model::IkRequest{.target = target * spec.tcp.inverse(), .frame = frames.tool, .joints = joints},
+            start);
+        if (not solution.converged) {
+            return failure(MotionFailure::Unreachable, "no joint configuration reaches the pose");
         }
-        return trajectoryController(profile, *trajectory, joints);
+        return jointMotion(profile, collisions, snapshot, joints, solution.position, goal.speed);
     };
 }
 
@@ -169,7 +256,8 @@ struct LocalRuntime final : RobotSession {
                  std::unique_ptr<hal::Backend> backend_, std::unique_ptr<control::RuntimeChannels> channels_,
                  std::unique_ptr<control::ControlCycle> cycle_, RuntimeOptions const &options_)
         : options{options_}, robot{std::move(profile_)}, model{std::move(model_)}, collisions{robot, *model},
-          backend{std::move(backend_)}, channels{std::move(channels_)}, cycle{std::move(cycle_)},
+          poses{robot, *model}, backend{std::move(backend_)}, channels{std::move(channels_)},
+          cycle{std::move(cycle_)},
           coordinator{std::make_unique<detail::Coordinator>(*channels, options.eventPeriod)},
           pool{std::make_unique<lexec::static_thread_pool>(options.planningThreads)},
           runner{std::make_unique<control::RealtimeRunner>(*cycle, backend->timeline(), options.realtime)} {
@@ -301,6 +389,7 @@ struct LocalRuntime final : RobotSession {
     RobotProfile robot;
     std::unique_ptr<model::RobotModel> model;
     CollisionGuard collisions;
+    PosePlanner poses;
     std::unique_ptr<hal::Backend> backend;
     std::unique_ptr<control::RuntimeChannels> channels;
     std::unique_ptr<control::ControlCycle> cycle;
@@ -337,21 +426,27 @@ Async<MotionResult> GroupMotion::moveToJoints(JointGoal goal) {
 Async<MotionResult> GroupMotion::moveToPose(PoseGoal goal) {
     return runtime->planned<MotionResult>([runtime = runtime, group = group, goal = std::move(goal)] {
         auto const &spec = runtime->robot.groups[group];
-        auto kinematics = runtime->model->makeKinematics();
-        auto const base = kinematics->findFrame(spec.baseFrame);
-        auto const tool = kinematics->findFrame(spec.toolFrame);
-        if (not base or not tool) {
+        if (not runtime->poses.frames[group]) {
             reject(MotionFailure::InvalidGoal, "group '" + spec.name + "' frames are not in the model");
         }
-        auto const seed = runtime->latest().command.position;
-        kinematics->update(seed);
-        auto const target = kinematics->framePose(*base) * goal.target;
-        auto const solution = runtime->model->makeIkSolver()->solve(
-            model::IkRequest{.target = target, .frame = *tool, .joints = maskOf(spec)}, seed);
-        if (not solution.converged) {
-            reject(MotionFailure::Unreachable, "no joint configuration reaches the pose");
+        if (goal.path == PathShape::Linear and not spec.cartesianLimits) {
+            reject(MotionFailure::InvalidGoal,
+                   "group '" + spec.name + "' has no cartesian_limits for straight-line motions");
         }
-        return jointPlan(*runtime, group, groupValues(spec, solution.position), requireSpeed(goal.speed));
+        if (not goal.target.translation.allFinite() or not goal.target.rotation.coeffs().allFinite() or
+            goal.target.rotation.norm() < 0.5) {
+            reject(MotionFailure::InvalidGoal, "the target pose is not a finite rigid transform");
+        }
+        auto normalized = goal;
+        normalized.target.rotation.normalize();
+        requireSpeed(goal.speed);
+        return detail::GoalPlan<MotionResult>{
+            .request = {.joints = maskOf(spec),
+                        .makeController = poseMotion(runtime->robot, runtime->poses, runtime->collisions,
+                                                     group, normalized)},
+            .result = [spec](control::RobotSnapshot const &snapshot) {
+                return MotionResult{.position = groupValues(spec, snapshot.state.joints.position)};
+            }};
     });
 }
 
@@ -373,9 +468,8 @@ Async<MotionResult> GroupMotion::followPath(JointPath path) {
             waypoint.position = withinLimits(runtime->robot, spec, waypoint.position);
         }
         auto const &robot = runtime->robot;
-        auto factory =
-            [&robot, &collisions = runtime->collisions, spec, joints, path = std::move(bounded)](
-                control::RobotSnapshot const &snapshot) -> Expected<std::unique_ptr<control::Controller>> {
+        auto factory = [&robot, &collisions = runtime->collisions, spec, joints,
+                        path = std::move(bounded)](control::RobotSnapshot const &snapshot) -> FactoryResult {
             auto const current = snapshot.command.position;
             auto const expand = [&](JointVector const &values) {
                 return withGroupValues(spec, current, values);
@@ -401,7 +495,7 @@ Async<MotionResult> GroupMotion::followPath(JointPath path) {
             }
             auto const trajectory = motion::interpolateWaypoints(waypoints);
             if (not trajectory) {
-                return tl::make_unexpected(trajectory.error());
+                return failure(MotionFailure::PlanningFailed, trajectory.error().message);
             }
             if (auto checked = collisions.check(**trajectory); not checked) {
                 return tl::make_unexpected(checked.error());
@@ -439,8 +533,7 @@ Async<GripResult> GroupGripper::grip(GripGoal goal) {
         mask.set(joint);
         return detail::GoalPlan<GripResult>{
             .request = {.joints = mask,
-                        .makeController = [config](control::RobotSnapshot const &)
-                            -> Expected<std::unique_ptr<control::Controller>> {
+                        .makeController = [config](control::RobotSnapshot const &) -> FactoryResult {
                             return control::makeGripperController(config);
                         }},
             .result = [joint, target = goal.position, tolerance](control::RobotSnapshot const &snapshot) {

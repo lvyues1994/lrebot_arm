@@ -1,7 +1,10 @@
-# Moves the group's tool frame to a pose, rest to rest.
+# Moves the group's tool center point (TCP) to a pose, rest to rest.
 
-# frame_id must be empty or the group's base frame.
+# frame_id empty or the group's base frame: the TCP pose in the base frame.
+# frame_id the group's tool frame: a move relative to the TCP where the motion starts.
 geometry_msgs/PoseStamped target
+# The TCP along a straight line instead of a joint-space motion.
+bool linear
 # Fraction of the robot's motion limits in (0, 1]; 0 means 1.
 float64 speed
 ---

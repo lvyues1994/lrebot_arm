@@ -180,11 +180,9 @@ void Coordinator::activate(std::uint64_t const goal, Pending &entry) {
     auto controller = entry.makeController(snapshot);
     entry.makeController = {};
     if (not controller) {
-        auto error =
-            MotionError{MotionFailure::PlanningFailed, control::FaultCode::None, controller.error().message};
         outbox.push_back(Delivery{.listener = std::move(entry.listener),
                                   .outcome = {.status = control::ControlStatus::Failed,
-                                              .error = std::move(error),
+                                              .error = std::move(controller.error()),
                                               .snapshot = snapshot}});
         return;
     }

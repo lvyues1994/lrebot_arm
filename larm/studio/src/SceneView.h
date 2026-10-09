@@ -21,6 +21,8 @@ struct SceneView final : QOpenGLWindow {
 
     // A pose marker in world coordinates; nullopt hides it.
     void setTarget(std::optional<Pose3> const &target_);
+    // Axes of the tool center point in world coordinates; nullopt hides them.
+    void setTool(std::optional<Pose3> const &tool_);
 
   protected:
     void initializeGL() override;
@@ -30,7 +32,8 @@ struct SceneView final : QOpenGLWindow {
     void wheelEvent(QWheelEvent *event) override;
 
   private:
-    void addTargetMarker();
+    void addMarkers();
+    void addAxes(Pose3 const &pose, double length, double width, float alpha);
 
     sim::SceneMirror &mirror;
     mjvCamera camera{};
@@ -39,6 +42,7 @@ struct SceneView final : QOpenGLWindow {
     mjrContext context{};
     bool contextReady{};
     std::optional<Pose3> target;
+    std::optional<Pose3> tool;
     QPointF lastMouse;
 };
 

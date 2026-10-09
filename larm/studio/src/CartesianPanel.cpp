@@ -31,17 +31,30 @@ CartesianPanel::CartesianPanel(StudioContext const &context_, JointGroupSpec gro
     measured = new QLabel{QStringLiteral("—")};
     form->addRow(QStringLiteral("Measured"), measured);
 
+    frame = new QComboBox;
+    frame->addItems({QStringLiteral("Base"), QStringLiteral("Tool")});
+    path = new QComboBox;
+    path->addItems({QStringLiteral("Joint"), QStringLiteral("Linear")});
+    // Moves relative to the tool are meant along its axes.
+    QObject::connect(frame, &QComboBox::currentIndexChanged, this,
+                     [this](int const index) { path->setCurrentIndex(index); });
     step = makeSpin(0.001, 0.2, 0.005, 3, QStringLiteral(" m"));
     step->setValue(0.02);
+    turn = makeSpin(1.0, 90.0, 5.0, 1, QStringLiteral(" °"));
+    turn->setValue(10.0);
     speed = makeSpin(0.05, 1.0, 0.05, 2);
     speed->setValue(0.5);
+    auto const axes =
+        std::array<QString, 6>{QStringLiteral("x"),  QStringLiteral("y"),  QStringLiteral("z"),
+                               QStringLiteral("Rx"), QStringLiteral("Ry"), QStringLiteral("Rz")};
     auto *const jogGrid = new QGridLayout;
-    for (std::size_t axis = 0; axis < 3; ++axis) {
+    for (std::size_t axis = 0; axis < axes.size(); ++axis) {
         for (auto const positive : {false, true}) {
             auto *const button =
-                new QPushButton{(positive ? QStringLiteral("+") : QStringLiteral("−")) + names[axis]};
+                new QPushButton{(positive ? QStringLiteral("+") : QStringLiteral("−")) + axes[axis]};
             jog[2 * axis + (positive ? 1 : 0)] = button;
-            jogGrid->addWidget(button, static_cast<int>(axis), positive ? 1 : 0);
+            jogGrid->addWidget(button, static_cast<int>(axis % 3),
+                               static_cast<int>(2 * (axis / 3)) + (positive ? 1 : 0));
             QObject::connect(button, &QPushButton::clicked, this,
                              [this, axis, positive] { jogAlong(axis, positive ? 1.0 : -1.0); });
         }
@@ -49,7 +62,10 @@ CartesianPanel::CartesianPanel(StudioContext const &context_, JointGroupSpec gro
     auto *const jogBox = new QHBoxLayout;
     jogBox->addLayout(jogGrid);
     auto *const jogSettings = new QFormLayout;
-    jogSettings->addRow(QStringLiteral("Jog step"), step);
+    jogSettings->addRow(QStringLiteral("Frame"), frame);
+    jogSettings->addRow(QStringLiteral("Path"), path);
+    jogSettings->addRow(QStringLiteral("Step"), step);
+    jogSettings->addRow(QStringLiteral("Turn"), turn);
     jogSettings->addRow(QStringLiteral("Speed"), speed);
     jogBox->addLayout(jogSettings);
 
@@ -72,9 +88,18 @@ CartesianPanel::CartesianPanel(StudioContext const &context_, JointGroupSpec gro
     QObject::connect(copy, &QPushButton::clicked, this, [this] { setTarget(currentPose()); });
     QObject::connect(move, &QPushButton::clicked, this, [this] {
         auto *const motion = context.session->motion(group.name);
-        operations->run(QStringLiteral("move to pose"),
-                        motion->moveToPose({.target = target(), .speed = speed->value()}));
+        operations->run(
+            QStringLiteral("move to pose"),
+            motion->moveToPose({.target = target(), .path = pathShape(), .speed = speed->value()}));
     });
+}
+
+void CartesianPanel::setJogFrame(runtime::Frame const jogFrame) {
+    frame->setCurrentIndex(jogFrame == runtime::Frame::Tool ? 1 : 0);
+}
+
+runtime::PathShape CartesianPanel::pathShape() const {
+    return path->currentIndex() == 1 ? runtime::PathShape::Linear : runtime::PathShape::Joint;
 }
 
 void CartesianPanel::refresh(control::RobotSnapshot const &snapshot) {
@@ -105,7 +130,12 @@ void CartesianPanel::setTarget(Pose3 const &pose) {
 
 Pose3 CartesianPanel::currentPose() {
     kinematics->update(current);
-    return kinematics->framePose(base).inverse() * kinematics->framePose(tool);
+    return kinematics->framePose(base).inverse() * kinematics->framePose(tool) * group.tcp;
+}
+
+Pose3 CartesianPanel::currentPoseInWorld() {
+    kinematics->update(current);
+    return kinematics->framePose(tool) * group.tcp;
 }
 
 void CartesianPanel::announceTarget() {
@@ -114,11 +144,29 @@ void CartesianPanel::announceTarget() {
 }
 
 void CartesianPanel::jogAlong(std::size_t const axis, double const sign) {
-    auto pose = currentPose();
-    pose.translation[static_cast<Eigen::Index>(axis)] += sign * step->value();
-    setTarget(pose);
+    auto delta = Pose3{};
+    if (axis < 3) {
+        delta.translation[static_cast<Eigen::Index>(axis)] = sign * step->value();
+    } else {
+        delta.rotation = Eigen::AngleAxisd{sign * turn->value() * std::numbers::pi / 180.0,
+                                           Eigen::Vector3d::Unit(static_cast<Eigen::Index>(axis - 3))};
+    }
+    auto const pose = currentPose();
     auto *const motion = context.session->motion(group.name);
-    operations->run(QStringLiteral("jog"), motion->moveToPose({.target = pose, .speed = speed->value()}));
+    if (frame->currentIndex() == 1) {
+        setTarget(pose * delta);
+        operations->run(QStringLiteral("jog"), motion->moveToPose({.target = delta,
+                                                                   .frame = runtime::Frame::Tool,
+                                                                   .path = pathShape(),
+                                                                   .speed = speed->value()}));
+        return;
+    }
+    // Along the base axes, or turning about them through the TCP.
+    auto const target = Pose3{.translation = pose.translation + delta.translation,
+                              .rotation = delta.rotation * pose.rotation};
+    setTarget(target);
+    operations->run(QStringLiteral("jog"),
+                    motion->moveToPose({.target = target, .path = pathShape(), .speed = speed->value()}));
 }
 
 } // namespace larm::studio

@@ -39,7 +39,14 @@ joints:
     gains: {stiffness: 2000.0, damping: 40.0}
 
 groups:
-  arm: {joints: [joint1, joint2, joint3, joint4, joint5, joint6], base: base_link, tool: gripper_end}
+  arm:
+    joints: [joint1, joint2, joint3, joint4, joint5, joint6]
+    base: base_link
+    tool: gripper_end
+    # gripper_end 约在两指尖之间；换工具时改这里（相对 gripper_end，URDF 的 xyz 与 rpy 约定）。
+    tcp: {xyz: [0, 0, 0], rpy: [0, 0, 0]}
+    # 直线运动的保守初值，待实测后调整。
+    cartesian_limits: {linear_velocity: 0.1, linear_acceleration: 0.5, angular_velocity: 0.5, angular_acceleration: 2.0}
   gripper: {joints: [gripper]}
 
 safety:
@@ -49,6 +56,10 @@ safety:
   enable_ramp_ms: 500
   # q=0 为折叠姿态：大臂、小臂压在各自的下限上，腕部靠在大臂上；该机械臂无抱闸，只在此姿态失能。
   rest_pose: [0, 0, 0, 0, 0, 0, 0]
+
+# 命名姿态，每个关节一个值。ready：小臂抬起、腕部离开大臂的工作准备姿态，末端系运动从这里开始。
+poses:
+  ready: [0, 0.7, 1.1, 0, 0, 0, 0]
 
 sim:
   physics_step_us: 500

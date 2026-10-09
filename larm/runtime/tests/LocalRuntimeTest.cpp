@@ -156,6 +156,75 @@ TEST_F(LocalRuntimeTest, ParksWithTheWristTurnedCloseToTheFoldedArm) {
     EXPECT_TRUE(run(session->park()));
 }
 
+struct ToolFrameTest : LocalRuntimeTest {
+    void SetUp() override {
+        LocalRuntimeTest::SetUp();
+        auto loaded = model::loadRobotModel(profile);
+        ASSERT_TRUE(loaded);
+        robotModel = std::move(*loaded);
+        kinematics = robotModel->makeKinematics();
+        auto const &spec = profile.groups[*profile.findGroup("arm")];
+        tool = *kinematics->findFrame(spec.toolFrame);
+        tcp = spec.tcp;
+    }
+
+    Pose3 tcpAt(JointVector const &q) {
+        kinematics->update(q);
+        return kinematics->framePose(tool) * tcp;
+    }
+
+    Pose3 measuredTcp() { return tcpAt(session->latest().state.joints.position); }
+    Pose3 commandedTcp() { return tcpAt(session->latest().command.position); }
+
+    static Pose3 shift(double const x, double const y, double const z) {
+        return Pose3{.translation = Eigen::Vector3d{x, y, z}};
+    }
+
+    std::unique_ptr<model::RobotModel> robotModel;
+    std::unique_ptr<model::Kinematics> kinematics;
+    model::FrameId tool;
+    Pose3 tcp;
+};
+
+// Steps start from the commanded TCP, so tracking errors do not accumulate.
+TEST_F(ToolFrameTest, ToolFrameStepsAddUp) {
+    auto const start = commandedTcp();
+    for (int step = 0; step < 2; ++step) {
+        ASSERT_TRUE(run(arm->moveToPose(
+            {.target = shift(0.0, 0.0, -0.02), .frame = Frame::Tool, .path = PathShape::Linear})));
+    }
+    auto const expected = start * shift(0.0, 0.0, -0.04);
+    auto const reached = commandedTcp();
+    EXPECT_LT((reached.translation - expected.translation).norm(), 5e-4);
+    EXPECT_LT(reached.rotation.angularDistance(expected.rotation), 2e-3);
+    EXPECT_LT((measuredTcp().translation - expected.translation).norm(), 0.005);
+}
+
+TEST_F(ToolFrameTest, TurnsAboutTheToolCenterPoint) {
+    auto const start = measuredTcp();
+    auto const turn = Pose3{.rotation = Eigen::Quaterniond{Eigen::AngleAxisd{0.3, Eigen::Vector3d::UnitX()}}};
+    ASSERT_TRUE(run(arm->moveToPose({.target = turn, .frame = Frame::Tool, .path = PathShape::Linear})));
+    auto const reached = measuredTcp();
+    EXPECT_LT((reached.translation - start.translation).norm(), 0.003);
+    EXPECT_NEAR(reached.rotation.angularDistance(start.rotation), 0.3, 0.01);
+}
+
+TEST_F(ToolFrameTest, MovesAlongABaseFrameLine) {
+    kinematics->update(session->latest().command.position);
+    auto const base = kinematics->framePose(*kinematics->findFrame("base_link"));
+    auto target = base.inverse() * measuredTcp();
+    target.translation += Eigen::Vector3d{0.0, 0.05, -0.05};
+    ASSERT_TRUE(run(arm->moveToPose({.target = target, .path = PathShape::Linear, .speed = 0.5})));
+    auto const reached = base.inverse() * measuredTcp();
+    EXPECT_LT((reached.translation - target.translation).norm(), 0.003);
+}
+
+TEST_F(ToolFrameTest, RejectsAToolFrameMoveOutOfReach) {
+    auto const error = expectMotionError(
+        arm->moveToPose({.target = shift(0.6, 0.0, 0.0), .frame = Frame::Tool, .path = PathShape::Linear}));
+    EXPECT_EQ(error.reason, MotionFailure::Unreachable) << error.what();
+}
+
 TEST_F(LocalRuntimeTest, FollowsATimedPathFromTheCurrentPosition) {
     auto path = JointPath{};
     auto middle = armTarget(0.3);

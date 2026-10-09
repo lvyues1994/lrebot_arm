@@ -13,7 +13,6 @@ namespace larm::studio {
 namespace {
 
 constexpr int kMaxGeoms = 4000;
-constexpr int kMarkerGeoms = 4;
 
 std::array<mjtNum, 3> toArray(Eigen::Vector3d const &vector) { return {vector.x(), vector.y(), vector.z()}; }
 
@@ -62,6 +61,11 @@ void SceneView::setTarget(std::optional<Pose3> const &target_) {
     update();
 }
 
+void SceneView::setTool(std::optional<Pose3> const &tool_) {
+    tool = tool_;
+    update();
+}
+
 void SceneView::initializeGL() {
     if (defaultFramebufferObject() != 0) {
         qWarning() << "the window's default framebuffer is not 0; MuJoCo may draw elsewhere";
@@ -73,7 +77,7 @@ void SceneView::initializeGL() {
 
 void SceneView::paintGL() {
     mjv_updateScene(&mirror.model(), &mirror.data(), &option, nullptr, &camera, mjCAT_ALL, &scene);
-    addTargetMarker();
+    addMarkers();
     auto const ratio = devicePixelRatio();
     auto const viewport =
         mjrRect{0, 0, static_cast<int>(width() * ratio), static_cast<int>(height() * ratio)};
@@ -81,23 +85,33 @@ void SceneView::paintGL() {
     mjr_render(viewport, &scene, &context);
 }
 
-void SceneView::addTargetMarker() {
-    if (not target or scene.ngeom + kMarkerGeoms > scene.maxgeom) {
+void SceneView::addMarkers() {
+    if (tool) {
+        addAxes(*tool, 0.06, 0.0025, 0.6f);
+    }
+    if (target and scene.ngeom < scene.maxgeom) {
+        auto const origin = toArray(target->translation);
+        auto const sphere = std::array<mjtNum, 3>{0.012, 0.0, 0.0};
+        auto const yellow = std::array<float, 4>{1.0f, 0.85f, 0.1f, 0.8f};
+        mjv_initGeom(&scene.geoms[scene.ngeom++], mjGEOM_SPHERE, sphere.data(), origin.data(), nullptr,
+                     yellow.data());
+        addAxes(*target, 0.08, 0.004, 1.0f);
+    }
+}
+
+void SceneView::addAxes(Pose3 const &pose, double const length, double const width, float const alpha) {
+    if (scene.ngeom + 3 > scene.maxgeom) {
         return;
     }
-    auto const origin = toArray(target->translation);
-    auto const sphere = std::array<mjtNum, 3>{0.012, 0.0, 0.0};
-    auto const yellow = std::array<float, 4>{1.0f, 0.85f, 0.1f, 0.8f};
-    mjv_initGeom(&scene.geoms[scene.ngeom++], mjGEOM_SPHERE, sphere.data(), origin.data(), nullptr,
-                 yellow.data());
-    auto const rotation = target->rotation.toRotationMatrix();
+    auto const origin = toArray(pose.translation);
+    auto const rotation = pose.rotation.toRotationMatrix();
     for (int axis = 0; axis < 3; ++axis) {
-        auto color = std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f};
+        auto color = std::array<float, 4>{0.0f, 0.0f, 0.0f, alpha};
         color[static_cast<std::size_t>(axis)] = 1.0f;
-        auto const tip = toArray(target->translation + 0.08 * rotation.col(axis));
+        auto const tip = toArray(pose.translation + length * rotation.col(axis));
         auto *const geom = &scene.geoms[scene.ngeom++];
         mjv_initGeom(geom, mjGEOM_ARROW, nullptr, nullptr, nullptr, color.data());
-        mjv_connector(geom, mjGEOM_ARROW, 0.004, origin.data(), tip.data());
+        mjv_connector(geom, mjGEOM_ARROW, width, origin.data(), tip.data());
     }
 }
 

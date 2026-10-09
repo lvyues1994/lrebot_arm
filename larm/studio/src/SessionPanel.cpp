@@ -4,6 +4,8 @@
 #include <QGridLayout>
 #include <QVBoxLayout>
 
+#include <algorithm>
+
 namespace larm::studio {
 
 SessionPanel::SessionPanel(StudioContext const &context_, QWidget *const parent)
@@ -27,6 +29,24 @@ SessionPanel::SessionPanel(StudioContext const &context_, QWidget *const parent)
     buttons->addWidget(disable, 0, 2);
     buttons->addWidget(reset, 1, 0);
     buttons->addWidget(stop, 1, 1);
+    auto const &profile = context.session->profile();
+    auto const pose = profile.poses.find("ready");
+    auto const arm =
+        std::find_if(profile.groups.begin(), profile.groups.end(), [&](JointGroupSpec const &group) {
+            return context.session->motion(group.name) != nullptr;
+        });
+    if (pose != profile.poses.end() and arm != profile.groups.end()) {
+        ready = new QPushButton{QStringLiteral("Ready")};
+        buttons->addWidget(ready, 1, 2);
+        auto target = zeroJointVector(arm->joints.size());
+        for (std::size_t i = 0; i < arm->joints.size(); ++i) {
+            target[idx(i)] = pose->second[idx(arm->joints[i])];
+        }
+        QObject::connect(ready, &QPushButton::clicked, this, [this, name = arm->name, target] {
+            operations->run(QStringLiteral("ready"),
+                            context.session->motion(name)->moveToJoints({.position = target, .speed = 0.5}));
+        });
+    }
     auto *const status = new QFormLayout;
     status->addRow(QStringLiteral("Power"), power);
     status->addRow(QStringLiteral("Safety"), safety);

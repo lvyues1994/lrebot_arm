@@ -237,23 +237,31 @@ struct RuntimeNodeImpl final : RuntimeNode {
                                     }));
             });
 
-        serve<MoveToPose>(group.name + "/move_to_pose", [this, base = group.baseFrame,
+        serve<MoveToPose>(group.name + "/move_to_pose", [this, base = group.baseFrame, tool = group.toolFrame,
                                                          motion](GoalHandle<MoveToPose> const &handle) {
             auto const goal = handle->get_goal();
-            guarded("move_to_pose", [&] {
-                auto const &frame = goal->target.header.frame_id;
-                if (not frame.empty() and frame != base) {
-                    throw std::invalid_argument{"target must be expressed in '" + base + "'"};
+            auto const frame = guarded("move_to_pose", [&] {
+                auto const &name = goal->target.header.frame_id;
+                if (name == tool) {
+                    return runtime::Frame::Tool;
                 }
-                return 0;
+                if (not name.empty() and name != base) {
+                    throw std::invalid_argument{"target must be expressed in '" + base + "' or '" + tool +
+                                                "'"};
+                }
+                return runtime::Frame::Base;
             });
-            return recorded("move_to_pose", motion->moveToPose({.target = toPose(goal->target.pose),
-                                                                .speed = speedOf(goal->speed)}) |
-                                                lexec::then([](runtime::MotionResult const &reached) {
-                                                    auto result = std::make_shared<MoveToPose::Result>();
-                                                    result->positions = toStd(reached.position);
-                                                    return result;
-                                                }));
+            return recorded("move_to_pose",
+                            motion->moveToPose({.target = toPose(goal->target.pose),
+                                                .frame = frame,
+                                                .path = goal->linear ? runtime::PathShape::Linear
+                                                                     : runtime::PathShape::Joint,
+                                                .speed = speedOf(goal->speed)}) |
+                                lexec::then([](runtime::MotionResult const &reached) {
+                                    auto result = std::make_shared<MoveToPose::Result>();
+                                    result->positions = toStd(reached.position);
+                                    return result;
+                                }));
         });
     }
 

@@ -35,8 +35,9 @@ Script::Script(MainWindow &window_, runtime::RobotSession &session_, Journal &jo
     auto *const cartesian = window.cartesianPanel();
     auto *const gripper = window.gripperPanel();
     auto *const path = window.pathPanel();
-    if (joints == nullptr or gripper == nullptr) {
-        journal.write(QStringLiteral("script: the profile needs an arm group and a gripper group"));
+    if (joints == nullptr or gripper == nullptr or sessionPanel->readyButton() == nullptr) {
+        journal.write(
+            QStringLiteral("script: the profile needs an arm group, a gripper group and a ready pose"));
         failed = true;
         return;
     }
@@ -44,8 +45,10 @@ Script::Script(MainWindow &window_, runtime::RobotSession &session_, Journal &jo
     steps.push_back({QStringLiteral("enable"),
                      [this](QStringList const &) { return session.latest().state.cycle > 0; },
                      [sessionPanel] { sessionPanel->enableButton()->click(); }});
+    steps.push_back({QStringLiteral("go to the ready pose"), after(QStringLiteral("enable: succeeded")),
+                     [sessionPanel] { sessionPanel->readyButton()->click(); }});
     steps.push_back(
-        {QStringLiteral("move to joint targets"), after(QStringLiteral("enable: succeeded")), [joints] {
+        {QStringLiteral("move to joint targets"), after(QStringLiteral("ready: succeeded")), [joints] {
              joints->setTargets(armPose(0.6));
              joints->setSpeed(0.6);
              joints->moveButton()->click();
@@ -65,6 +68,14 @@ Script::Script(MainWindow &window_, runtime::RobotSession &session_, Journal &jo
              capture(QStringLiteral("2-cartesian"));
              cartesian->jogButton(0, true)->click();
          }});
+    steps.push_back({QStringLiteral("back off 2 cm along the tool's x axis, straight"),
+                     after(QStringLiteral("jog: succeeded")), [cartesian] {
+                         cartesian->setJogFrame(runtime::Frame::Tool);
+                         cartesian->jogButton(0, false)->click();
+                     }});
+    steps.push_back({QStringLiteral("turn 10° about the tool's x axis"),
+                     after(QStringLiteral("jog: succeeded")),
+                     [cartesian] { cartesian->jogButton(3, true)->click(); }});
     steps.push_back({QStringLiteral("grip"), after(QStringLiteral("jog: succeeded")), [this, gripper] {
                          window.showPanel(gripper);
                          gripper->setWidth(0.035);

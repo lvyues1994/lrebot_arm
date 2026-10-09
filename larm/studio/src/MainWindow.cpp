@@ -102,6 +102,9 @@ void MainWindow::refresh() {
         joints->refresh(snapshot);
         cartesian->refresh(snapshot);
         path->refresh(snapshot);
+        if (view and snapshot.state.cycle > 0) {
+            view->setTool(cartesian->currentPoseInWorld());
+        }
     }
     if (gripper) {
         gripper->refresh(snapshot);

@@ -160,6 +160,40 @@ std::size_t jointIndexByName(std::vector<JointSpec> const &joints, std::string c
     return static_cast<std::size_t>(found - joints.begin());
 }
 
+Eigen::Vector3d parseVector3(YAML::Node const &node, std::string const &path) {
+    if (not node.IsSequence() or node.size() != 3) {
+        failAt(path, "expected [x, y, z]");
+    }
+    return {scalar<double>(node[0], path), scalar<double>(node[1], path), scalar<double>(node[2], path)};
+}
+
+// URDF convention: roll, pitch, yaw about the fixed x, y, z axes.
+Pose3 parseTcp(YAML::Node const &node, std::string const &path) {
+    requireKeys(node, path, {"xyz", "rpy"});
+    auto tcp = Pose3{};
+    if (node["xyz"]) {
+        tcp.translation = parseVector3(node["xyz"], childPath(path, "xyz"));
+    }
+    if (node["rpy"]) {
+        auto const rpy = parseVector3(node["rpy"], childPath(path, "rpy"));
+        tcp.rotation = Eigen::AngleAxisd{rpy.z(), Eigen::Vector3d::UnitZ()} *
+                       Eigen::AngleAxisd{rpy.y(), Eigen::Vector3d::UnitY()} *
+                       Eigen::AngleAxisd{rpy.x(), Eigen::Vector3d::UnitX()};
+    }
+    return tcp;
+}
+
+CartesianLimits parseCartesianLimits(YAML::Node const &node, std::string const &path) {
+    requireKeys(node, path,
+                {"linear_velocity", "linear_acceleration", "angular_velocity", "angular_acceleration"});
+    return CartesianLimits{
+        .linearVelocity = positive(node, path, "linear_velocity"),
+        .linearAcceleration = positive(node, path, "linear_acceleration"),
+        .angularVelocity = positive(node, path, "angular_velocity"),
+        .angularAcceleration = positive(node, path, "angular_acceleration"),
+    };
+}
+
 std::vector<JointGroupSpec> parseGroups(YAML::Node const &node, std::string const &path,
                                         std::vector<JointSpec> const &joints) {
     if (not node.IsMap() or node.size() == 0) {
@@ -171,7 +205,7 @@ std::vector<JointGroupSpec> parseGroups(YAML::Node const &node, std::string cons
         auto group = JointGroupSpec{.name = entry.first.as<std::string>()};
         auto const groupPath = childPath(path, group.name);
         auto const groupNode = YAML::Node{entry.second};
-        requireKeys(groupNode, groupPath, {"joints", "base", "tool"});
+        requireKeys(groupNode, groupPath, {"joints", "base", "tool", "tcp", "cartesian_limits"});
         auto const members = required(groupNode, groupPath, "joints");
         auto const membersPath = childPath(groupPath, "joints");
         if (not members.IsSequence() or members.size() == 0) {
@@ -192,9 +226,53 @@ std::vector<JointGroupSpec> parseGroups(YAML::Node const &node, std::string cons
         if (groupNode["tool"]) {
             group.toolFrame = scalar<std::string>(groupNode["tool"], childPath(groupPath, "tool"));
         }
+        for (auto const *const key : {"tcp", "cartesian_limits"}) {
+            if (groupNode[key] and group.toolFrame.empty()) {
+                failAt(childPath(groupPath, key), "needs the group's tool frame");
+            }
+        }
+        if (groupNode["tcp"]) {
+            group.tcp = parseTcp(groupNode["tcp"], childPath(groupPath, "tcp"));
+        }
+        if (groupNode["cartesian_limits"]) {
+            group.cartesianLimits =
+                parseCartesianLimits(groupNode["cartesian_limits"], childPath(groupPath, "cartesian_limits"));
+        }
         groups.push_back(std::move(group));
     }
     return groups;
+}
+
+JointVector parseConfiguration(YAML::Node const &node, std::string const &path,
+                               std::vector<JointSpec> const &joints) {
+    if (not node.IsSequence() or node.size() != joints.size()) {
+        failAt(path, "expected one value per joint");
+    }
+    auto configuration = zeroJointVector(joints.size());
+    for (std::size_t i = 0; i < joints.size(); ++i) {
+        auto const value = scalar<double>(node[i], path);
+        if (not(value >= joints[i].limits.lower and value <= joints[i].limits.upper)) {
+            failAt(path, "value for '" + joints[i].name + "' is outside its position limits");
+        }
+        configuration[idx(i)] = value;
+    }
+    return configuration;
+}
+
+std::map<std::string, JointVector, std::less<>> parsePoses(YAML::Node const &node, std::string const &path,
+                                                           std::vector<JointSpec> const &joints) {
+    auto poses = std::map<std::string, JointVector, std::less<>>{};
+    if (not node) {
+        return poses;
+    }
+    if (not node.IsMap()) {
+        failAt(path, "expected a mapping of named poses");
+    }
+    for (auto const &entry : node) {
+        auto const name = entry.first.as<std::string>();
+        poses.emplace(name, parseConfiguration(entry.second, childPath(path, name), joints));
+    }
+    return poses;
 }
 
 SafetySpec parseSafety(YAML::Node const &node, std::string const &path,
@@ -219,19 +297,8 @@ SafetySpec parseSafety(YAML::Node const &node, std::string const &path,
     safety.enableRamp =
         std::chrono::milliseconds{static_cast<std::int64_t>(nonNegative(node, path, "enable_ramp_ms"))};
 
-    auto const rest = required(node, path, "rest_pose");
-    auto const restPath = childPath(path, "rest_pose");
-    if (not rest.IsSequence() or rest.size() != joints.size()) {
-        failAt(restPath, "expected one value per joint");
-    }
-    safety.restPose = zeroJointVector(joints.size());
-    for (std::size_t i = 0; i < joints.size(); ++i) {
-        auto const value = scalar<double>(rest[i], restPath);
-        if (value < joints[i].limits.lower or value > joints[i].limits.upper) {
-            failAt(restPath, "value for '" + joints[i].name + "' is outside its position limits");
-        }
-        safety.restPose[idx(i)] = value;
-    }
+    safety.restPose =
+        parseConfiguration(required(node, path, "rest_pose"), childPath(path, "rest_pose"), joints);
     return safety;
 }
 
@@ -242,7 +309,7 @@ ConfigNode section(YAML::Node const &root, char const *key, std::filesystem::pat
 
 RobotProfile parseProfileNode(YAML::Node const &root, std::filesystem::path const &baseDirectory) {
     requireKeys(root, "profile",
-                {"robot", "description", "control", "joints", "groups", "safety", "sim", "driver"});
+                {"robot", "description", "control", "joints", "groups", "safety", "poses", "sim", "driver"});
     auto profile = RobotProfile{};
     profile.name = requiredScalar<std::string>(root, "", "robot");
 
@@ -265,6 +332,7 @@ RobotProfile parseProfileNode(YAML::Node const &root, std::filesystem::path cons
     profile.joints = parseJoints(required(root, "", "joints"), "joints");
     profile.groups = parseGroups(required(root, "", "groups"), "groups", profile.joints);
     profile.safety = parseSafety(required(root, "", "safety"), "safety", profile.joints);
+    profile.poses = parsePoses(root["poses"], "poses", profile.joints);
     profile.sim = section(root, "sim", baseDirectory);
     profile.driver = section(root, "driver", baseDirectory);
     return profile;

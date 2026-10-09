@@ -9,5 +9,5 @@ larm_target_warnings(larm_motion)
 
 if(LARM_BUILD_TESTS)
     larm_add_test(larm_motion_tests SOURCES tests/PointToPointTest.cpp tests/StopPlannerTest.cpp tests/WaypointTest.cpp
-        tests/CollisionScanTest.cpp LIBRARIES larm::motion)
+        tests/CollisionScanTest.cpp tests/LinearMotionTest.cpp LIBRARIES larm::motion)
 endif()

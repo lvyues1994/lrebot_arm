@@ -3,10 +3,13 @@
 #include <larm/core/ConfigNode.h>
 #include <larm/core/Error.h>
 #include <larm/core/JointVector.h>
+#include <larm/core/Pose.h>
 #include <larm/core/Time.h>
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -39,11 +42,23 @@ struct JointSpec {
     JointGains gains;
 };
 
+// Limits of a tool center point moving along a straight line.
+struct CartesianLimits {
+    double linearVelocity{};
+    double linearAcceleration{};
+    double angularVelocity{};
+    double angularAcceleration{};
+};
+
 struct JointGroupSpec {
     std::string name;
     std::vector<std::size_t> joints;
     std::string baseFrame;
     std::string toolFrame;
+    // The tool center point in the tool frame; pose goals and Cartesian motions refer to it.
+    Pose3 tcp;
+    // Straight-line motions need them.
+    std::optional<CartesianLimits> cartesianLimits;
 };
 
 struct SafetySpec {
@@ -66,6 +81,8 @@ struct RobotProfile {
     std::vector<JointSpec> joints;
     std::vector<JointGroupSpec> groups;
     SafetySpec safety;
+    // Named configurations within the limits, one value per joint; "ready" is where work starts.
+    std::map<std::string, JointVector, std::less<>> poses;
     ConfigNode sim;
     ConfigNode driver;
 

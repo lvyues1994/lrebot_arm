@@ -74,6 +74,46 @@ TEST(RobotProfile, ResolvesSrdfNextToTheProfile) {
     EXPECT_EQ(profile->srdf, std::filesystem::path{"/base/robot.srdf"});
 }
 
+TEST(RobotProfile, ParsesTheToolCenterPointAndCartesianLimits) {
+    auto const plain = parseRobotProfile(kValidProfile, "/base");
+    ASSERT_TRUE(plain) << plain.error().message;
+    EXPECT_TRUE(plain->groups[0].tcp.translation.isZero());
+    EXPECT_FALSE(plain->groups[0].cartesianLimits);
+
+    auto const profile = parseRobotProfile(
+        replace(kValidProfile, "tool: tool}",
+                "tool: tool, tcp: {xyz: [0.0, 0.0, 0.1], rpy: [0.0, 0.0, 1.5707963267948966]},"
+                " cartesian_limits: {linear_velocity: 0.1, linear_acceleration: 0.5,"
+                " angular_velocity: 0.4, angular_acceleration: 2.0}}"),
+        "/base");
+    ASSERT_TRUE(profile) << profile.error().message;
+    auto const &arm = profile->groups[0];
+    EXPECT_TRUE(arm.tcp.translation.isApprox(Eigen::Vector3d{0.0, 0.0, 0.1}));
+    EXPECT_TRUE((arm.tcp.rotation * Eigen::Vector3d::UnitX()).isApprox(Eigen::Vector3d::UnitY(), 1e-12));
+    ASSERT_TRUE(arm.cartesianLimits);
+    EXPECT_DOUBLE_EQ(arm.cartesianLimits->angularVelocity, 0.4);
+}
+
+TEST(RobotProfile, RejectsAToolCenterPointWithoutAToolFrame) {
+    auto const error =
+        parseFailure(replace(kValidProfile, "hand: {joints: [b]}", "hand: {joints: [b], tcp: {}}"));
+    EXPECT_NE(error.message.find("groups.hand.tcp: needs the group's tool frame"), std::string::npos)
+        << error.message;
+}
+
+TEST(RobotProfile, ParsesNamedPosesWithinLimits) {
+    auto const profile =
+        parseRobotProfile(replace(kValidProfile, "sim: {", "poses: {ready: [0.5, 0.05]}\nsim: {"), "/base");
+    ASSERT_TRUE(profile) << profile.error().message;
+    ASSERT_EQ(profile->poses.count("ready"), 1u);
+    EXPECT_DOUBLE_EQ(profile->poses.find("ready")->second[0], 0.5);
+
+    auto const error = parseFailure(replace(kValidProfile, "sim: {", "poses: {ready: [1.5, 0.05]}\nsim: {"));
+    EXPECT_NE(error.message.find("poses.ready: value for 'a' is outside its position limits"),
+              std::string::npos)
+        << error.message;
+}
+
 TEST(RobotProfile, RejectsUnknownKey) {
     auto const error = parseFailure(
         replace(kValidProfile, "control: {period_us: 2000}", "control: {period_us: 2000, rate: 5}"));
@@ -127,6 +167,8 @@ TEST(RobotProfile, LoadsRebotProfile) {
     EXPECT_EQ(profile->urdf.filename(), "rebot_b601_rs.urdf");
     EXPECT_TRUE(profile->urdf.is_absolute());
     EXPECT_EQ(profile->srdf.filename(), "rebot_b601_rs.srdf");
+    EXPECT_TRUE(profile->groups[*arm].cartesianLimits);
+    EXPECT_EQ(profile->poses.count("ready"), 1u);
 }
 
 } // namespace
