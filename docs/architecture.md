@@ -442,6 +442,42 @@ CO2_END
 
 任务取消时，co2 的 `stop_token` 经桥传给正在等待的 sender，最终变成实时侧的受控停止。
 
+### 5.7 末端坐标系与直线运动
+
+目标：位姿目标可以用末端（TCP）坐标系表示，例如沿夹爪方向前进 2 cm、绕夹爪轴转 10°；末端可以沿笛卡尔直线运动。这一节只覆盖离散运动（一次一个目标）。连续伺服（`CartesianServo`，遥操作用）随第 5 步加入。
+
+- TCP：关节组的工具帧加一个固定偏置（配置 `groups.<组>.tcp`，默认为零），由此得到 TCP。位姿目标、相对运动的增量、旋转中心、Studio 显示的当前位姿，都指 TCP。
+- 位姿目标：
+
+```cpp
+enum class Frame : std::uint8_t { Base, Tool };
+enum class PathShape : std::uint8_t { Joint, Linear };
+
+struct PoseGoal {
+    Pose3 target;                        // Base：TCP 在基座帧中的位姿；Tool：相对运动开始时 TCP 的增量
+    Frame frame = Frame::Base;
+    PathShape path = PathShape::Joint;   // Joint：IK 后关节空间点到点；Linear：TCP 走直线、姿态匀速转动
+    double speed = 1.0;
+};
+```
+
+- 相对的基准：`Tool` 目标以激活时的指令位姿为基准，而不是实测位姿，所以连续点动不会累积跟踪误差。被抢占的目标从停稳处重新计算。
+- 规划时机：位姿目标的 IK 与直线规划都在激活时、由 `ControllerFactory` 完成，和点到点一样以当时的指令状态为起点。工厂的失败带 `MotionFailure`：IK 无解为 `unreachable`，奇异、关节跳变、自碰撞为 `planning_failed`。
+- 直线规划 `planLinear`（`larm_motion`）：
+  1. 位置线性插值、姿态球面插值，路径参数 s ∈ [0, 1]。
+  2. 沿路径每约 1 mm 或 0.5° 求一次 IK，以上一个解为初值、不随机重启。以下情况拒绝：无解、超出关节限位、相邻两点任一关节变化超过 0.05 rad（接近奇异或换了解支）。
+  3. 关节路径 q(s) 在采样点之间用三次 Hermite 插值。
+  4. s(t) 由 Ruckig 一维规划，速度、加速度上限取线速度与角速度两者中较严的（配置 `groups.<组>.cartesian_limits`，乘以 `speed`）。
+  5. 关节速度 dq/ds·ṡ 或关节加速度超限时，整体放慢后重新规划 s(t)。
+  6. 按 10 ms 取带速度的路点，交给 `WaypointTrajectory`，再走自碰撞扫描与轨迹控制器。实时侧与安全层不变。
+- 命名姿态：配置 `poses`，每个关节一个值，加载时检查限位。`ready` 是工作准备姿态：停放姿态下腕部靠在大臂上，末端系的大部分运动会被自碰撞拒绝，所以末端系运动从 `ready` 开始。
+- ROS：`MoveToPose` 的 `target.header.frame_id` 为空或为基座帧时是绝对位姿；为该组的工具帧时是相对 TCP 的增量；新增 `bool linear`。
+- Studio：
+  - 会话面板加 Ready 按钮。
+  - 笛卡尔面板加"基座/末端"与"直线/关节"选择，选末端时默认直线；点动有 ±X/Y/Z（步长 m）与 ±Rx/Ry/Rz（步长 °）。基座系的旋转点动绕基座轴、过 TCP。
+  - 视口画出 TCP 的坐标轴。
+- 不在本节范围：工具帧下的连续速度伺服、带姿态约束的避障规划、运行时切换 TCP。
+
 ## 6 模块设计
 
 每个模块对应一个 CMake 目标，命名空间为 `larm::<模块>`，头文件为 `<larm/<模块>/Foo.h>`。
@@ -449,7 +485,7 @@ CO2_END
 ### 6.1 larm_core
 
 - 职责：基础类型（5.1）、`Pose3`、`Twist`、`Wrench`；时间类型；错误类型；机器人配置；实时原语 `SpscRing`、`LatestValue`。
-- 机器人配置 `RobotProfile`：关节（名称、单位、限位、默认增益）、关节组（成员、基座帧、工具帧）、控制周期、安全参数、停放姿态、描述文件路径；`driver` 与 `sim` 段原样交给对应工厂解析。配置从 YAML 加载并在加载时校验，未知键报错。ROS 参数只用来指定配置文件和后端，不重复配置内容，这样训练环境不需要 ROS 也能读同一份配置。
+- 机器人配置 `RobotProfile`：关节（名称、单位、限位、默认增益）、关节组（成员、基座帧、工具帧、TCP 偏置、笛卡尔限值）、控制周期、安全参数、停放姿态、命名姿态（5.7）、描述文件路径；`driver` 与 `sim` 段原样交给对应工厂解析。配置从 YAML 加载并在加载时校验，未知键报错。ROS 参数只用来指定配置文件和后端，不重复配置内容，这样训练环境不需要 ROS 也能读同一份配置。
 - 依赖：Eigen、yaml-cpp、tl-expected。
 - 验证：单元测试（配置解析与校验；实时原语在 TSan 下的并发测试）。
 
@@ -469,7 +505,7 @@ CO2_END
 
 - 职责：轨迹类型、轨迹生成、规划。
 - 接口：`JointTrajectory`：`duration()`、`sample(t, JointSample &out) const noexcept`（位置、速度、加速度）；对象不可变，实时侧求值不分配。
-- 实现：`RuckigTrajectory`（多关节同步、限加加速度的点到点）；`WaypointTrajectory`（多路点 + 时间参数化）；笛卡尔直线在非实时侧用 IK 稠密采样转成关节轨迹。
+- 实现：`RuckigTrajectory`（多关节同步、限加加速度的点到点）；`WaypointTrajectory`（多路点 + 时间参数化）；笛卡尔直线 `planLinear` 在非实时侧用 IK 稠密采样转成关节轨迹（5.7）。
   - `WaypointTrajectory` 中路点未给出的速度由相邻路点求出，并按 Fritsch–Carlson 条件限幅：关节在路点处转向或停顿时速度取 0。这样每段都落在两端路点之间，路点不超限，路径就不超限。否则，以当前位置作为第一个路点时，第一段会先反向冲出去，在限位上的关节会被带出限位。
 - `findCollision(trajectory, checker, step)`：从轨迹起点允许已有接触，按每个关节的最大步长（转动关节 0.02 rad，夹爪 2 mm）采样整条轨迹做自碰撞检查，返回第一次碰撞的连杆对与时刻。
 - `MotionPlanner`（非实时）：目标 → IK → 碰撞检查 → 时间参数化 → `JointTrajectory`。全局避障规划需要时交给 MoveIt，MoveIt 输出经 FollowJointTrajectory 回到本框架执行。
@@ -562,7 +598,7 @@ CO2_END
 | 发布 | `~/joint_command` | `sensor_msgs/JointState`（安全层输出的指令位置，供示教录制） |
 | 发布（仿真） | `/clock`、`~/sim/scene_state`、相机图像 | `rosgraph_msgs/Clock`、`larm_msgs/SceneState`、`sensor_msgs/Image` |
 | Action | `~/<组>/follow_joint_trajectory` | `control_msgs/FollowJointTrajectory`（MoveIt 可直接使用） |
-| Action | `~/<组>/move_to_pose`、`~/<组>/move_to_joints` | `larm_msgs` |
+| Action | `~/<组>/move_to_pose`（`frame_id` 为工具帧时是相对 TCP 的增量，`linear` 走直线，见 5.7）、`~/<组>/move_to_joints` | `larm_msgs` |
 | Action | `~/gripper/gripper_command` | `control_msgs/GripperCommand` |
 | Action | `~/run_policy`（启用 ONNX 时） | `larm_msgs/RunPolicy` |
 | 订阅 | `~/<组>/servo/twist`、`~/<组>/servo/joint_jog` | `geometry_msgs/TwistStamped`、`control_msgs/JointJog` |
@@ -595,7 +631,7 @@ CO2_END
 - 面板（第 3 步）：
   - 会话：使能、停放、失能、复位故障、停止、急停；显示电源、安全状态、故障、运行中的目标。
   - 关节：目标、实测、速度、复制当前值、移动、停止。
-  - 笛卡尔：基座坐标系下的 xyz 与 RPY、复制当前位姿、±X/Y/Z 点动、移动、停止；目标同步到视口标记。
+  - 笛卡尔：基座坐标系下的 xyz 与 RPY、复制当前位姿、±X/Y/Z 点动、移动、停止；目标同步到视口标记。末端坐标系、直线运动、旋转点动与 Ready 按钮见 5.7。
   - 路径：路点列表，从当前位置或关节面板的目标添加，按等间隔时间经 `followPath` 执行。
   - 夹爪：宽度、最大力、打开、关闭、夹取。
   - 主窗口以 30 Hz 读取快照，依次更新 `SceneMirror`、视口、各面板和日志视图。
@@ -747,6 +783,7 @@ lrebot_arm/
 2. **运行时与 ROS 2**（已完成）：runtime、msgs、ros。完成标准：仿真后端下 FollowJointTrajectory、MoveToPose、夹爪、急停、抢占通过 ROS 集成测试（进程内经 DDS 驱动节点）；launch 启动后命令行可操作，TF 完整。
 3. **Studio**（已完成）：远程会话、`SceneMirror`、视口，以及会话、关节、笛卡尔、路径、夹爪面板。完成标准：脚本模式走通主要流程。
 4. **真机**：RobStride 驱动，按"只读 → 使能保持 → 单关节小幅运动 → 慢速轨迹"逐级上真机；实测总线负载与周期抖动，确定控制频率。离线部分已完成：驱动、调试探针、真机 launch，以及在模拟电机上的整栈演练。上真机的各级等 PCAN 连接、并经操作者逐级批准后进行（检查清单见 README）。
+   - 插入项（进行中）：**末端坐标系与直线运动**（5.7）。完成标准：末端系点动连续两次 2 cm 等于一次 4 cm；直线运动中 TCP 偏离直线不超过 0.5 mm；奇异与不可达被拒绝并说明原因；ROS 与 Studio 可用，脚本模式包含末端系点动。
 5. **示教与模仿学习**：遥操作与拖动示教录制、MCAP → LeRobot 转换、Python 推理节点经流式关节目标部署；先仿真后真机。
 6. **强化学习**：learning 环境、larm_py、示例任务（末端到达），PPO 训练，ONNX 部署到仿真再到真机。
 
