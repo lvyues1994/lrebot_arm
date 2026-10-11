@@ -1,17 +1,21 @@
 // larm_driver_probe: brings RobStride hardware up one step at a time.
 //
-//   larm_driver_probe --profile FILE [--simulated] [--output FILE] [--rt-priority N] COMMAND
+//   larm_driver_probe --profile FILE [--joints J1,J2,...] [--simulated] [--output FILE] [--rt-priority N]
+//                     COMMAND
 //
 //   scan                          ping every actuator, read its settings and position (read-only)
 //   monitor SECONDS               sample positions at 50 Hz through parameter reads (read-only)
 //   hold SECONDS --confirm-power  enable at the rest pose, hold, disable
-//   jog JOINT RADIANS --confirm-motion
-//                                 enable, move one arm joint by at most 0.2 rad and back slowly, disable
+//   jog JOINT RADIANS [--speed FRACTION] --confirm-motion
+//                                 enable, move one arm joint by at most 0.2 rad and back slowly, disable;
+//                                 FRACTION of the joint limits is at most 0.2, the default
 //
-// Writes one JSON object per line. Commands that power the motors need their confirmation flag and
-// refuse to start unless the arm rests at the profile's rest pose without faults. Ctrl+C stops the
-// motion; the arm is disabled only where it rests, otherwise it is left holding and reported.
-// --simulated runs the same code against simulated motors carrying the arm's gravity.
+// --joints keeps only those joints of the profile, with their actuators: the other motors are never
+// addressed, neither read nor powered. Writes one JSON object per line. Commands that power the motors
+// need their confirmation flag and refuse to start unless the arm rests at the profile's rest pose
+// without faults. Ctrl+C stops the motion; the arm is disabled only where it rests, otherwise it is
+// left holding and reported. --simulated runs the same code against simulated motors carrying the
+// arm's gravity.
 #include "JsonLine.h"
 #include "ReadOnlyBus.h"
 
@@ -45,11 +49,25 @@ struct Options {
     bool simulated{};
     std::string output;
     int rtPriority{};
+    // Empty: every joint of the profile.
+    std::vector<std::string> joints;
+    double speed = kJogSpeed;
     std::string command;
     std::vector<std::string> arguments;
     bool confirmPower{};
     bool confirmMotion{};
 };
+
+std::vector<std::string> splitNames(std::string const &list) {
+    auto names = std::vector<std::string>{};
+    auto stream = std::istringstream{list};
+    for (auto name = std::string{}; std::getline(stream, name, ',');) {
+        if (not name.empty()) {
+            names.push_back(name);
+        }
+    }
+    return names;
+}
 
 std::optional<Options> parse(int const argc, char **argv) {
     auto options = Options{};
@@ -58,7 +76,8 @@ std::optional<Options> parse(int const argc, char **argv) {
         auto const next = [&]() -> std::optional<std::string> {
             return i + 1 < argc ? std::optional<std::string>{argv[++i]} : std::nullopt;
         };
-        if (argument == "--profile" or argument == "--output" or argument == "--rt-priority") {
+        if (argument == "--profile" or argument == "--output" or argument == "--rt-priority" or
+            argument == "--joints" or argument == "--speed") {
             auto const value = next();
             if (not value) {
                 return std::nullopt;
@@ -67,6 +86,13 @@ std::optional<Options> parse(int const argc, char **argv) {
                 options.profile = *value;
             } else if (argument == "--output") {
                 options.output = *value;
+            } else if (argument == "--joints") {
+                options.joints = splitNames(*value);
+            } else if (argument == "--speed") {
+                auto stream = std::istringstream{*value};
+                if (not(stream >> options.speed) or not(options.speed > 0.0 and options.speed <= kJogSpeed)) {
+                    return std::nullopt;
+                }
             } else {
                 auto stream = std::istringstream{*value};
                 if (not(stream >> options.rtPriority)) {
@@ -89,6 +115,66 @@ std::optional<Options> parse(int const argc, char **argv) {
         return std::nullopt;
     }
     return options;
+}
+
+// The profile cut down to the named joints, in profile order. Groups lose the other members (and go
+// when none is left), and the driver section keeps only the actuators of the named joints.
+larm::Expected<larm::RobotProfile> restrictTo(larm::RobotProfile const &profile,
+                                              std::vector<std::string> const &names) {
+    for (auto const &name : names) {
+        if (not profile.findJoint(name)) {
+            return larm::makeError(larm::ErrorCode::InvalidArgument,
+                                   "the profile has no joint '" + name + "'");
+        }
+    }
+    auto const kept = [&](std::string const &name) {
+        return std::find(names.begin(), names.end(), name) != names.end();
+    };
+    auto reduced = profile;
+    reduced.joints.clear();
+    auto remap = std::vector<std::optional<std::size_t>>(profile.dof());
+    for (std::size_t i = 0; i < profile.dof(); ++i) {
+        if (kept(profile.joints[i].name)) {
+            remap[i] = reduced.joints.size();
+            reduced.joints.push_back(profile.joints[i]);
+        }
+    }
+    auto const subset = [&](JointVector const &values) {
+        auto out = larm::zeroJointVector(reduced.dof());
+        for (std::size_t i = 0; i < profile.dof(); ++i) {
+            if (remap[i]) {
+                out[larm::idx(*remap[i])] = values[larm::idx(i)];
+            }
+        }
+        return out;
+    };
+    reduced.groups.clear();
+    for (auto group : profile.groups) {
+        auto members = std::vector<std::size_t>{};
+        for (auto const joint : group.joints) {
+            if (remap[joint]) {
+                members.push_back(*remap[joint]);
+            }
+        }
+        if (not members.empty()) {
+            group.joints = std::move(members);
+            reduced.groups.push_back(std::move(group));
+        }
+    }
+    reduced.safety.restPose = subset(profile.safety.restPose);
+    for (auto &[name, pose] : reduced.poses) {
+        pose = subset(pose);
+    }
+    auto actuators = YAML::Node{YAML::NodeType::Sequence};
+    for (auto const &actuator : profile.driver.node["actuators"]) {
+        if (actuator["joint"] and kept(actuator["joint"].as<std::string>())) {
+            actuators.push_back(YAML::Clone(actuator));
+        }
+    }
+    // Nodes share their data when copied.
+    reduced.driver.node = YAML::Clone(profile.driver.node);
+    reduced.driver.node["actuators"] = actuators;
+    return reduced;
 }
 
 // Blocks SIGINT and SIGTERM in every thread and turns them into a stop request.
@@ -477,18 +563,20 @@ struct Probe {
         }
         auto const sampling = sampler(*running->session);
         auto *const arm = running->session->motion("arm");
-        auto const ok = succeeded(running->session->enable(), "enable") and
-                        succeeded(arm->moveToJoints({.position = target, .speed = kJogSpeed}), "jog out") and
-                        succeeded(arm->moveToJoints({.position = rest, .speed = kJogSpeed}), "jog back");
+        auto const ok =
+            succeeded(running->session->enable(), "enable") and
+            succeeded(arm->moveToJoints({.position = target, .speed = options.speed}), "jog out") and
+            succeeded(arm->moveToJoints({.position = rest, .speed = options.speed}), "jog back");
         return finish(*running, ok ? kOk : kFailed);
     }
 };
 
 void usage() {
     std::cerr
-        << "usage: larm_driver_probe --profile FILE [--simulated] [--output FILE] [--rt-priority N] COMMAND\n"
+        << "usage: larm_driver_probe --profile FILE [--joints J1,J2,...] [--simulated] [--output FILE]\n"
+           "                         [--rt-priority N] COMMAND\n"
            "  scan\n  monitor SECONDS\n  hold SECONDS --confirm-power\n"
-           "  jog JOINT RADIANS --confirm-motion\n";
+           "  jog JOINT RADIANS [--speed FRACTION<=0.2] --confirm-motion\n";
 }
 
 } // namespace
@@ -510,6 +598,9 @@ int main(int argc, char **argv) {
         }
     }
     auto profile = larm::loadRobotProfile(options->profile);
+    if (profile and not options->joints.empty()) {
+        profile = restrictTo(*profile, options->joints);
+    }
     if (not profile) {
         std::cerr << "larm_driver_probe: " << profile.error().message << '\n';
         return kUsage;
@@ -525,6 +616,14 @@ int main(int argc, char **argv) {
                        .stop = &stop,
                        .options = *options};
     auto const &arguments = options->arguments;
+    auto joints = std::string{};
+    for (auto const &actuator : probe.config.actuators) {
+        joints += (joints.empty() ? "" : ",") + actuator.jointName;
+    }
+    probe.emit(
+        JsonLine{"profile"}
+            .field("joints", joints)
+            .field("interface", options->simulated ? std::string{"simulated"} : probe.config.interface));
     try {
         if (options->command == "scan" and arguments.empty()) {
             return probe.scan();
