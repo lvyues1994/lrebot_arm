@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <mutex>
+#include <thread>
 
 namespace larm::drivers::robstride {
 namespace {
@@ -60,7 +61,7 @@ struct SimulatedBus final : can::CanTransport {
     std::size_t send(std::span<CanFrame const> frames) noexcept override;
     std::size_t receive(std::span<CanFrame> frames) noexcept override;
     bool waitReadable(Duration timeout) noexcept override;
-
+    can::BusState busState() const noexcept override;
     can::TransportStatistics statistics() const noexcept override;
 
   private:
@@ -120,14 +121,34 @@ struct SimulatedMotorsImpl final : SimulatedMotors {
         motors.at(actuator).runMode = mode;
     }
 
-    // Frames from the driver: commands act, then the motors move one step if any motion frame arrived.
-    void deliver(std::span<CanFrame const> const frames) noexcept {
+    void setBusState(can::BusState const state) override {
         auto const guard = std::lock_guard{lock};
+        counters.busState = state;
+    }
+
+    void setUnpowered(bool const unpowered_) override {
+        auto const guard = std::lock_guard{lock};
+        unpowered = unpowered_;
+    }
+
+    // Frames from the driver: commands act, then the motors move one step if any motion frame arrived.
+    std::size_t deliver(std::span<CanFrame const> const frames) noexcept {
+        auto const guard = std::lock_guard{lock};
+        if (counters.busState == can::BusState::Off) {
+            counters.sendFailures += frames.size();
+            return 0;
+        }
+        counters.sent += frames.size();
+        if (unpowered) {
+            counters.errorFrames += frames.size();
+            counters.unacknowledged += frames.size();
+            return frames.size();
+        }
         for (auto const &frame : frames) {
             handle(frame);
         }
         step();
-        counters.sent += frames.size();
+        return frames.size();
     }
 
     std::size_t take(std::span<CanFrame> const out) noexcept {
@@ -142,7 +163,15 @@ struct SimulatedMotorsImpl final : SimulatedMotors {
         return counters;
     }
 
-    bool hasPending() const noexcept {
+    // Replies only follow frames sent from this side, so with none pending the wait runs out.
+    bool waitPending(Duration const timeout) const noexcept {
+        {
+            auto const guard = std::lock_guard{lock};
+            if (not pending.empty()) {
+                return true;
+            }
+        }
+        std::this_thread::sleep_for(timeout);
         auto const guard = std::lock_guard{lock};
         return not pending.empty();
     }
@@ -280,20 +309,22 @@ struct SimulatedMotorsImpl final : SimulatedMotors {
     FrameQueue pending;
     can::TransportStatistics counters;
     bool moved{};
+    bool unpowered{};
     // The driver's thread and the caller's thread meet here.
     mutable std::mutex lock;
 };
 
 std::size_t SimulatedBus::send(std::span<CanFrame const> const frames) noexcept {
-    motors->deliver(frames);
-    return frames.size();
+    return motors->deliver(frames);
 }
 
 std::size_t SimulatedBus::receive(std::span<CanFrame> const frames) noexcept { return motors->take(frames); }
 
+can::BusState SimulatedBus::busState() const noexcept { return motors->busStatistics().busState; }
+
 can::TransportStatistics SimulatedBus::statistics() const noexcept { return motors->busStatistics(); }
 
-bool SimulatedBus::waitReadable(Duration) noexcept { return motors->hasPending(); }
+bool SimulatedBus::waitReadable(Duration const timeout) noexcept { return motors->waitPending(timeout); }
 
 } // namespace
 

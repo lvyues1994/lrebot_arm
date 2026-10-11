@@ -13,6 +13,8 @@ namespace larm::control {
 // Which thread calls tick() and how time advances in between is decided by the caller.
 struct ControlCycle {
     virtual ~ControlCycle() = default;
+    // Once on the thread that will call tick(), before the first tick; may allocate.
+    virtual void prepareThread() noexcept = 0;
     virtual void tick() noexcept = 0;
 };
 

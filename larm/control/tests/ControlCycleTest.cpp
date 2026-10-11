@@ -286,6 +286,36 @@ TEST_F(ControlCycleTest, FeedbackLossFaultsAndLatchesUntilReset) {
         [](SafetyChanged const &event) { return event.state == SafetyState::Normal; }));
 }
 
+TEST_F(ControlCycleTest, ResetReArmsADroppedActuatorWhileTheOthersHold) {
+    enable();
+    run(10);
+    backend->dropActuator(2);
+    run(2);
+    EXPECT_EQ(snapshot().safety, SafetyState::Faulted);
+    EXPECT_EQ(snapshot().fault, FaultCode::ActuatorFault);
+    EXPECT_EQ(snapshot().power, DrivePower::Disabled);
+    EXPECT_DOUBLE_EQ(backend->lastCommand().stiffness[1], profile.joints[1].gains.stiffness);
+    EXPECT_EQ(backend->lastCommand().stiffness[2], 0.0);
+    run(20);
+    EXPECT_EQ(snapshot().safety, SafetyState::Faulted);
+
+    events.clear();
+    push(ResetFault{});
+    run(2);
+    EXPECT_EQ(snapshot().safety, SafetyState::Normal);
+    EXPECT_LT(backend->lastCommand().stiffness[2], profile.joints[2].gains.stiffness);
+    EXPECT_DOUBLE_EQ(backend->lastCommand().stiffness[1], profile.joints[1].gains.stiffness);
+    EXPECT_FALSE(powered());
+    for (int i = 0; i < 300 and not powered(); ++i) {
+        run(1);
+        EXPECT_DOUBLE_EQ(backend->lastCommand().stiffness[1], profile.joints[1].gains.stiffness);
+    }
+    ASSERT_TRUE(powered());
+    EXPECT_EQ(snapshot().power, DrivePower::Enabled);
+    EXPECT_DOUBLE_EQ(backend->lastCommand().stiffness[2], profile.joints[2].gains.stiffness);
+    EXPECT_TRUE(backend->lastCommand().position.isApprox(clearancePose(), 1e-9));
+}
+
 TEST_F(ControlCycleTest, EmergencyStopAbortsAndHolds) {
     enable();
     auto target = clearancePose();

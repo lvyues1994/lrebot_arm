@@ -13,6 +13,7 @@
 
 #include <cerrno>
 #include <cstdlib>
+#include <thread>
 
 extern "C" {
 void *__libc_malloc(std::size_t size);
@@ -184,6 +185,17 @@ struct NoAllocation : testing::TestWithParam<BackendKind> {
     std::unique_ptr<control::ControlCycle> cycle;
     JointMask arm;
 };
+
+// As the realtime runner does: a thread of its own, prepared before its first cycle.
+TEST_P(NoAllocation, ControlLoopOnAPreparedThreadNeverAllocates) {
+    ASSERT_TRUE(channels->requests.tryPush(control::SetDrivePower{.power = hal::DrivePower::Enabled}));
+    auto counted = std::size_t{};
+    std::thread{[&] {
+        cycle->prepareThread();
+        counted = runCounted(200);
+    }}.join();
+    EXPECT_EQ(counted, 0u);
+}
 
 TEST_P(NoAllocation, ControlLoopNeverAllocates) {
     ASSERT_TRUE(channels->requests.tryPush(control::SetDrivePower{.power = hal::DrivePower::Enabled}));

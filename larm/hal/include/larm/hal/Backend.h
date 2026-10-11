@@ -23,13 +23,27 @@ struct DriverCapabilities {
     }
 };
 
+// What the control loop asks of the drives each cycle. Implicit from DrivePower: most writers only ask
+// for power.
+struct PowerRequest {
+    PowerRequest(DrivePower const power_ = DrivePower::Disabled, std::uint32_t const rearm_ = 0) noexcept
+        : power{power_}, rearm{rearm_} {}
+
+    DrivePower power;
+    // Changes each time actuators that dropped out while powered should be cleared and enabled again;
+    // the others are not touched.
+    std::uint32_t rearm;
+};
+
 // Called only from the control loop: no allocation, no locks, bounded time.
 struct RealtimeIo {
     virtual ~RealtimeIo() = default;
+    // Once on the control loop's thread before its first cycle, for per-thread set-up that may allocate.
+    virtual void prepareThread() noexcept {}
     virtual void read(RobotState &out) noexcept = 0;
     // Power changes also go through the control loop so the bus has a single writer;
     // the resulting actuator state comes back through read().
-    virtual void write(JointCommand const &command, DrivePower requested) noexcept = 0;
+    virtual void write(JointCommand const &command, PowerRequest const &power) noexcept = 0;
 };
 
 // Owns time for the control loop: hardware sleeps until the next period, simulation steps physics.

@@ -10,9 +10,10 @@ namespace {
 
 struct SteppedClock final : hal::Timeline {
     TimePoint now() const noexcept override { return time; }
-    void advance() noexcept override { time += std::chrono::milliseconds{4}; }
+    void advance() noexcept override { time += step; }
 
     TimePoint time{};
+    Duration step = std::chrono::milliseconds{4};
 };
 
 // A recording bus between the driver and the simulated motors.
@@ -25,6 +26,7 @@ struct Tap final : can::CanTransport {
     }
     std::size_t receive(std::span<CanFrame> const frames) noexcept override { return inner->receive(frames); }
     bool waitReadable(Duration const timeout) noexcept override { return inner->waitReadable(timeout); }
+    can::BusState busState() const noexcept override { return inner->busState(); }
     can::TransportStatistics statistics() const noexcept override { return inner->statistics(); }
 
     std::unique_ptr<can::CanTransport> inner;
@@ -48,7 +50,7 @@ struct RobStrideDriverTest : testing::Test {
     }
 
     // One control cycle as the control loop runs it.
-    void cycle(hal::DrivePower const power, int const count = 1) {
+    void cycle(hal::PowerRequest const power, int const count = 1) {
         for (int i = 0; i < count; ++i) {
             driver->io().read(state);
             driver->io().write(command, power);
@@ -56,11 +58,14 @@ struct RobStrideDriverTest : testing::Test {
         }
     }
 
-    // Typed frames sent since `from`.
-    std::size_t sentOfType(FrameType const type, std::size_t const from = 0) const {
-        return static_cast<std::size_t>(
-            std::count_if(bus->sent.begin() + static_cast<long>(from), bus->sent.end(),
-                          [&](CanFrame const &frame) { return headerOf(frame)->type == type; }));
+    // Typed frames sent since `from`, to one motor or to all.
+    std::size_t sentOfType(FrameType const type, std::size_t const from = 0,
+                           std::optional<std::uint8_t> const motor = std::nullopt) const {
+        return static_cast<std::size_t>(std::count_if(
+            bus->sent.begin() + static_cast<long>(from), bus->sent.end(), [&](CanFrame const &frame) {
+                auto const header = headerOf(frame);
+                return header->type == type and (not motor or header->destination == *motor);
+            }));
     }
 
     bool allEnabled() const {
@@ -105,6 +110,36 @@ TEST_F(RobStrideDriverTest, ConnectChecksEveryActuator) {
     auto const wrongMode = driver->connect();
     ASSERT_FALSE(wrongMode);
     EXPECT_NE(wrongMode.error().message.find("run_mode 2"), std::string::npos) << wrongMode.error().message;
+}
+
+TEST_F(RobStrideDriverTest, ConnectChecksActuatorsAtOnceAndReportsEveryFailure) {
+    motors->setSilent(2, true);
+    motors->setSilent(5, true);
+    auto const started = std::chrono::steady_clock::now();
+    auto const connected = driver->connect();
+    auto const elapsed = std::chrono::steady_clock::now() - started;
+    ASSERT_FALSE(connected);
+    EXPECT_NE(connected.error().message.find("actuator 0x3 (joint3) does not answer"), std::string::npos)
+        << connected.error().message;
+    EXPECT_NE(connected.error().message.find("actuator 0x6 (joint6) does not answer"), std::string::npos)
+        << connected.error().message;
+    // One reply timeout of 100 ms, not one per silent actuator.
+    EXPECT_LT(elapsed, std::chrono::milliseconds{180});
+}
+
+TEST_F(RobStrideDriverTest, ConnectSaysWhenNothingOnTheBusAcknowledges) {
+    motors->setUnpowered(true);
+    auto const connected = driver->connect();
+    ASSERT_FALSE(connected);
+    EXPECT_NE(connected.error().message.find("no node acknowledges frames on can0"), std::string::npos)
+        << connected.error().message;
+}
+
+TEST_F(RobStrideDriverTest, ConnectRefusesABusOffController) {
+    motors->setBusState(can::BusState::Off);
+    auto const connected = driver->connect();
+    ASSERT_FALSE(connected);
+    EXPECT_NE(connected.error().message.find("bus-off"), std::string::npos) << connected.error().message;
 }
 
 TEST_F(RobStrideDriverTest, PollsPositionsWithoutTouchingPowerWhileDisabled) {
@@ -167,6 +202,59 @@ TEST_F(RobStrideDriverTest, AFaultedMotorStaysOffUntilPowerIsRequestedAgain) {
     cycle(hal::DrivePower::Enabled, 5);
     EXPECT_TRUE(allEnabled());
     EXPECT_EQ(state.actuators[2].faultBits, 0u);
+}
+
+TEST_F(RobStrideDriverTest, ReArmsADroppedMotorWithoutTouchingTheOthers) {
+    enable();
+    motors->injectFault(2, status_flag::kOvercurrent, 1U << 16U);
+    cycle(hal::DrivePower::Enabled, 20);
+    EXPECT_FALSE(state.actuators[2].enabled);
+    auto const before = bus->sent.size();
+    for (int i = 0; i < 5; ++i) {
+        cycle(hal::PowerRequest{hal::DrivePower::Enabled, 1});
+        for (std::size_t j = 0; j < profile.dof(); ++j) {
+            if (j != 2) {
+                EXPECT_TRUE(motors->enabled(j)) << j;
+            }
+        }
+    }
+    EXPECT_TRUE(allEnabled());
+    EXPECT_TRUE(motors->enabled(2));
+    EXPECT_EQ(state.actuators[2].faultBits, 0u);
+    EXPECT_EQ(sentOfType(FrameType::Disable, before), 1u);
+    EXPECT_EQ(sentOfType(FrameType::Enable, before), 1u);
+}
+
+TEST_F(RobStrideDriverTest, EnableTimesOutAfterTheSameTimeWhateverThePeriod) {
+    for (auto const period : {std::chrono::milliseconds{4}, std::chrono::milliseconds{2}}) {
+        clock.step = period;
+        ASSERT_TRUE(driver->connect());
+        cycle(hal::DrivePower::Disabled, 2);
+        motors->setSilent(3, true);
+        auto const before = bus->sent.size();
+        cycle(hal::DrivePower::Enabled, 300);
+        auto const attempts = sentOfType(FrameType::Enable, before, 4);
+        auto const expected = static_cast<std::size_t>(std::chrono::milliseconds{200} / period);
+        EXPECT_GE(attempts, expected) << period.count() << " ms";
+        EXPECT_LE(attempts, expected + 2) << period.count() << " ms";
+        EXPECT_FALSE(state.actuators[3].enabled);
+        motors->setSilent(3, false);
+        cycle(hal::DrivePower::Disabled, 5);
+    }
+}
+
+TEST_F(RobStrideDriverTest, ABusOffLeavesTheMotorsAsTheyAreAndTheFeedbackStale) {
+    enable();
+    motors->setBusState(can::BusState::Off);
+    cycle(hal::DrivePower::Enabled, 5);
+    EXPECT_FALSE(state.isFresh);
+    for (std::size_t i = 0; i < profile.dof(); ++i) {
+        EXPECT_TRUE(motors->enabled(i)) << i;
+    }
+    motors->setBusState(can::BusState::Active);
+    cycle(hal::DrivePower::Enabled, 3);
+    EXPECT_TRUE(state.isFresh);
+    EXPECT_TRUE(allEnabled());
 }
 
 TEST_F(RobStrideDriverTest, DisablingReturnsToPositionPolling) {

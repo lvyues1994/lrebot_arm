@@ -19,12 +19,15 @@ struct DriverStatistics {
 
 // RobStride motors on one CAN bus, driven with motion (MIT-style impedance) frames.
 //
-// Per actuator and cycle the driver sends one frame and expects one reply before the next read():
-// a position read while disabled, enable frames while enabling, motion frames while running and
-// disable frames while disabling. Disabled motors are never sent disable frames, so a motor left
-// running by another program keeps its last command until power is requested. A motor that leaves
-// run mode by itself is not re-enabled until power is requested again; that request first clears
-// latched motor faults. Joint feedback goes through each actuator's transmission.
+// connect() checks every actuator (ping, run_mode, zero_sta) and applies the configured reporting
+// and CAN timeout, all actuators at once. Per actuator and cycle the driver then sends one frame and
+// expects one reply before the next read(): a position read while disabled, enable frames while
+// enabling (200 ms at most), motion frames while running and disable frames while disabling.
+// Disabled motors are never sent disable frames, so a motor left running by another program keeps
+// its last command until power is requested. A motor that leaves run mode by itself, or does not
+// enter it in time, drops out: it is sent disable frames until power is withdrawn or the request
+// asks to re-arm, which first clears latched motor faults. While the bus is off nothing changes on
+// the motors and the feedback goes stale. Joint feedback goes through each actuator's transmission.
 struct RobStrideDriver : hal::RobotDriver {
     virtual DriverStatistics statistics() const noexcept = 0;
 };

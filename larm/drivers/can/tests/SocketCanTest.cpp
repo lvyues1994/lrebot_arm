@@ -1,11 +1,39 @@
 #include <larm/drivers/can/CanTransport.h>
 
+#include <linux/can.h>
+#include <linux/can/error.h>
+
 #include <gtest/gtest.h>
 
 namespace larm::drivers::can {
 namespace {
 
 constexpr char const *kVirtualBus = "vcan0";
+
+std::array<std::uint8_t, 8> controller(std::uint8_t const bits) { return {0, bits, 0, 0, 0, 0, 0, 0}; }
+
+TEST(ErrorFrames, TrackTheControllerThroughWarningPassiveBusOffAndRestart) {
+    auto const flag = std::uint32_t{CAN_ERR_FLAG};
+    EXPECT_EQ(decodeErrorFrame(flag | CAN_ERR_CRTL, controller(CAN_ERR_CRTL_TX_WARNING)).state,
+              BusState::Warning);
+    EXPECT_EQ(
+        decodeErrorFrame(flag | CAN_ERR_CRTL, controller(CAN_ERR_CRTL_RX_PASSIVE | CAN_ERR_CRTL_RX_WARNING))
+            .state,
+        BusState::Passive);
+    EXPECT_EQ(decodeErrorFrame(flag | CAN_ERR_CRTL, controller(CAN_ERR_CRTL_ACTIVE)).state, BusState::Active);
+    EXPECT_EQ(
+        decodeErrorFrame(flag | CAN_ERR_BUSOFF | CAN_ERR_CRTL, controller(CAN_ERR_CRTL_TX_PASSIVE)).state,
+        BusState::Off);
+    EXPECT_EQ(decodeErrorFrame(flag | CAN_ERR_RESTARTED, controller(0)).state, BusState::Active);
+    EXPECT_FALSE(decodeErrorFrame(flag | CAN_ERR_CRTL, controller(CAN_ERR_CRTL_RX_OVERFLOW)).state);
+}
+
+TEST(ErrorFrames, ReportFramesNobodyAcknowledged) {
+    auto const missing = decodeErrorFrame(CAN_ERR_FLAG | CAN_ERR_ACK | CAN_ERR_TX_TIMEOUT, controller(0));
+    EXPECT_TRUE(missing.unacknowledged);
+    EXPECT_FALSE(missing.state);
+    EXPECT_FALSE(decodeErrorFrame(CAN_ERR_FLAG | CAN_ERR_PROT, controller(0)).unacknowledged);
+}
 
 TEST(SocketCan, RejectsMissingInterfaces) {
     auto const missing = openSocketCan("larm_none0");
@@ -46,7 +74,8 @@ TEST(SocketCan, ExchangesFramesOnAVirtualBus) {
     }
     EXPECT_EQ((*sender)->statistics().sent, frames.size());
     EXPECT_EQ((*receiver)->statistics().received, frames.size());
-    EXPECT_FALSE((*receiver)->statistics().busOff);
+    EXPECT_EQ((*receiver)->busState(), BusState::Active);
+    EXPECT_EQ((*sender)->statistics().sendFailures, 0u);
 }
 
 } // namespace

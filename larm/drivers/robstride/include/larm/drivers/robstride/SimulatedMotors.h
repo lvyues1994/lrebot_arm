@@ -37,6 +37,10 @@ struct SimulatedMotors {
     virtual void setSilent(std::size_t actuator, bool silent) = 0;
     // Run mode the motor reports through parameter 0x7005.
     virtual void setRunMode(std::size_t actuator, std::int8_t mode) = 0;
+    // The controller's standing on the bus; while it is off, frames are refused.
+    virtual void setBusState(can::BusState state) = 0;
+    // Motors without power: nothing answers, and every frame sent comes back unacknowledged.
+    virtual void setUnpowered(bool unpowered) = 0;
 };
 
 std::unique_ptr<SimulatedMotors> makeSimulatedMotors(DriverConfig const &config,

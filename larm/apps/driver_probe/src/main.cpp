@@ -146,7 +146,8 @@ struct Probe {
             simulated = robstride::makeSimulatedMotors(config, {.position = restMotorPosition()});
             return ReadOnlyBus{config, simulated->transport()};
         }
-        auto transport = larm::drivers::can::openSocketCan(config.interface);
+        auto transport =
+            larm::drivers::can::openSocketCan(config.interface, {.burst = config.actuators.size()});
         if (not transport) {
             throw std::runtime_error{transport.error().message};
         }
@@ -406,8 +407,11 @@ struct Probe {
                  .field("sent", statistics.transport.sent)
                  .field("received", statistics.transport.received)
                  .field("send_failures", statistics.transport.sendFailures)
+                 .field("queue_full", statistics.transport.queueFull)
                  .field("error_frames", statistics.transport.errorFrames)
-                 .field("bus_off", statistics.transport.busOff)
+                 .field("unacknowledged", statistics.transport.unacknowledged)
+                 .field("bus_state", larm::drivers::can::toString(statistics.transport.busState))
+                 .field("interface_down", statistics.transport.interfaceDown)
                  .field("missed_periods", running.backend->timeline().missedPeriods())
                  .field("bus_time_ms", larm::toSeconds(robstride::cycleBusTime(config)) * 1e3)
                  .field("period_ms", larm::toSeconds(profile.controlPeriod) * 1e3));

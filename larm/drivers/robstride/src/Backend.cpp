@@ -28,7 +28,8 @@ Expected<std::unique_ptr<RobStrideBackend>> makeRobStrideBackend(RobotProfile co
     if (not config) {
         return tl::make_unexpected(config.error());
     }
-    auto transport = can::openSocketCan(config->interface);
+    // One frame per actuator goes out each cycle.
+    auto transport = can::openSocketCan(config->interface, {.burst = config->actuators.size()});
     if (not transport) {
         return tl::make_unexpected(transport.error());
     }

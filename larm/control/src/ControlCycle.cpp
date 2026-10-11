@@ -15,7 +15,9 @@ template <class... Handlers> struct Overloaded : Handlers... {
 };
 template <class... Handlers> Overloaded(Handlers...) -> Overloaded<Handlers...>;
 
-// Degraded: some actuators dropped out while power was requested; the rest hold until disabled.
+// Ramping: every actuator is on and some joints are still ramping their stiffness up.
+// Degraded: some actuators dropped out while power was requested; the rest hold until disabled, or
+// until a fault reset re-arms the dropped ones.
 enum class PowerPhase : std::uint8_t { Off, Ramping, On, Degraded };
 
 struct Slot {
@@ -71,6 +73,8 @@ struct ControlCycleImpl final : ControlCycle {
         }
     }
 
+    void prepareThread() noexcept override { io->prepareThread(); }
+
     void tick() noexcept override {
         auto const started = std::chrono::steady_clock::now();
         io->read(state);
@@ -82,7 +86,7 @@ struct ControlCycleImpl final : ControlCycle {
         runControllers();
         fillUnclaimed();
         enforceLimits();
-        io->write(command, requestedPower);
+        io->write(command, hal::PowerRequest{requestedPower, rearm});
         publish(started);
         flushRetired();
     }
@@ -111,34 +115,76 @@ struct ControlCycleImpl final : ControlCycle {
     }
 
     void updatePower() noexcept {
-        auto const first = state.actuators.begin();
-        auto const last = first + static_cast<long>(dof);
-        auto const isOn = [](ActuatorStatus const &actuator) { return actuator.enabled; };
-        auto const actuatorsOn = std::all_of(first, last, isOn);
-        auto const anyOn = std::any_of(first, last, isOn);
+        auto on = JointMask{};
+        for (std::size_t i = 0; i < dof; ++i) {
+            on.set(i, state.actuators[i].enabled);
+        }
+        auto const actuatorsOn = on == allJoints;
+        auto const restarted = on & ~powered;
+        powered = on;
         switch (phase) {
         case PowerPhase::Off:
             if (actuatorsOn and state.isFresh and requestedPower == hal::DrivePower::Enabled) {
                 phase = PowerPhase::Ramping;
-                rampStart = state.stamp;
                 holdTarget = state.joints.position;
+                startRamp(allJoints);
             }
             break;
         case PowerPhase::Ramping:
         case PowerPhase::On:
             if (not actuatorsOn) {
-                loseActuators(anyOn);
-            } else if (phase == PowerPhase::Ramping and state.stamp - rampStart >= enableRamp) {
+                loseActuators(on.any());
+                break;
+            }
+            finishRamps();
+            if (phase == PowerPhase::Ramping and ramping.none()) {
                 phase = PowerPhase::On;
                 emit(PowerChanged{.power = hal::DrivePower::Enabled});
             }
             break;
         case PowerPhase::Degraded:
-            if (not anyOn) {
+            if (on.none()) {
                 phase = PowerPhase::Off;
+                break;
+            }
+            // Re-armed actuators resume where their joints are now, softly.
+            for (std::size_t i = 0; i < dof; ++i) {
+                if (restarted.test(i)) {
+                    holdTarget[idx(i)] = state.joints.position[idx(i)];
+                }
+            }
+            startRamp(restarted);
+            if (actuatorsOn and state.isFresh) {
+                phase = PowerPhase::Ramping;
+                becomeNormal();
             }
             break;
         }
+    }
+
+    void startRamp(JointMask const &joints) noexcept {
+        for (std::size_t i = 0; i < dof; ++i) {
+            if (joints.test(i)) {
+                rampStart[i] = state.stamp;
+            }
+        }
+        ramping |= joints;
+    }
+
+    void finishRamps() noexcept {
+        for (std::size_t i = 0; i < dof; ++i) {
+            if (ramping.test(i) and state.stamp - rampStart[i] >= enableRamp) {
+                ramping.reset(i);
+            }
+        }
+    }
+
+    // Stiffness fraction of a powered joint.
+    double rampScale(std::size_t const joint) const noexcept {
+        if (not ramping.test(joint) or enableRamp <= Duration{0}) {
+            return 1.0;
+        }
+        return std::clamp(toSeconds(state.stamp - rampStart[joint]) / toSeconds(enableRamp), 0.0, 1.0);
     }
 
     // An actuator that drops out unasked is a fault; the others keep holding where the arm is.
@@ -236,6 +282,19 @@ struct ControlCycleImpl final : ControlCycle {
         if (safety == SafetyState::Normal or not state.isFresh or outsideLimits()) {
             return;
         }
+        if (phase == PowerPhase::Degraded and requestedPower == hal::DrivePower::Enabled) {
+            // The driver clears and re-enables the actuators that dropped out; safety returns to
+            // normal once they are all back (updatePower).
+            ++rearm;
+            return;
+        }
+        becomeNormal();
+    }
+
+    void becomeNormal() noexcept {
+        if (safety == SafetyState::Normal) {
+            return;
+        }
         safety = SafetyState::Normal;
         fault = FaultCode::None;
         holdTarget = state.joints.position;
@@ -288,19 +347,20 @@ struct ControlCycleImpl final : ControlCycle {
             command.damping.setZero();
             return;
         }
-        auto scale = 1.0;
-        if (phase == PowerPhase::Ramping and enableRamp > Duration{0}) {
-            scale = std::clamp(toSeconds(state.stamp - rampStart) / toSeconds(enableRamp), 0.0, 1.0);
-        }
         auto const claimed = claimedJoints();
         for (std::size_t i = 0; i < dof; ++i) {
             if (claimed.test(i)) {
                 continue;
             }
             auto const j = idx(i);
+            // An unpowered joint is followed, so that it resumes where it is once powered again.
+            if (not powered.test(i)) {
+                holdTarget[j] = state.joints.position[j];
+            }
+            auto const scale = powered.test(i) ? rampScale(i) : 0.0;
             command.position[j] = holdTarget[j];
             command.velocity[j] = 0.0;
-            command.effort[j] = cache.gravity[j];
+            command.effort[j] = powered.test(i) ? cache.gravity[j] : 0.0;
             command.stiffness[j] = scale * hold.stiffness[j];
             command.damping[j] = scale * hold.damping[j];
         }
@@ -425,8 +485,13 @@ struct ControlCycleImpl final : ControlCycle {
     std::array<std::unique_ptr<Controller>, kRetireBacklog> retireBacklog{};
     std::uint32_t staleCycles{};
     hal::DrivePower requestedPower = hal::DrivePower::Disabled;
+    std::uint32_t rearm{};
     PowerPhase phase = PowerPhase::Off;
-    TimePoint rampStart{};
+    // Actuators reporting enabled this cycle.
+    JointMask powered;
+    // Joints whose stiffness is still ramping up, and since when.
+    JointMask ramping;
+    std::array<TimePoint, kMaxDof> rampStart{};
     SafetyState safety = SafetyState::Normal;
     FaultCode fault = FaultCode::None;
 };

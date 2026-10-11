@@ -13,6 +13,8 @@
 #include <atomic>
 #include <cerrno>
 #include <cstring>
+#include <ctime>
+#include <string_view>
 #include <utility>
 
 namespace larm::drivers::can {
@@ -59,13 +61,24 @@ struct Counters {
     std::atomic<std::uint64_t> sent{0};
     std::atomic<std::uint64_t> received{0};
     std::atomic<std::uint64_t> sendFailures{0};
+    std::atomic<std::uint64_t> queueFull{0};
     std::atomic<std::uint64_t> errorFrames{0};
-    std::atomic<bool> busOff{false};
+    std::atomic<std::uint64_t> unacknowledged{0};
+    std::atomic<BusState> busState{BusState::Active};
+    std::atomic<bool> interfaceDown{false};
 
     void add(std::atomic<std::uint64_t> &counter, std::uint64_t const value) noexcept {
         counter.fetch_add(value, std::memory_order_relaxed);
     }
 };
+
+bool queueIsFull(int const error) noexcept {
+    return error == ENOBUFS or error == EAGAIN or error == EWOULDBLOCK;
+}
+
+bool interfaceIsGone(int const error) noexcept {
+    return error == ENETDOWN or error == ENODEV or error == ENXIO;
+}
 
 struct SocketCan final : CanTransport {
     explicit SocketCan(FileDescriptor socket_) : socket{std::move(socket_)} {
@@ -79,6 +92,9 @@ struct SocketCan final : CanTransport {
 
     std::size_t send(std::span<CanFrame const> const out) noexcept override {
         auto queued = std::size_t{0};
+        // A partial batch means the transmit queue filled up.
+        auto full = false;
+        auto down = false;
         while (queued < out.size()) {
             auto const count = std::min(kBatch, out.size() - queued);
             for (std::size_t i = 0; i < count; ++i) {
@@ -87,15 +103,24 @@ struct SocketCan final : CanTransport {
             auto const accepted =
                 ::sendmmsg(socket.fd, messages.data(), static_cast<unsigned>(count), MSG_DONTWAIT);
             if (accepted <= 0) {
+                auto const error = errno;
+                full = queueIsFull(error);
+                down = interfaceIsGone(error);
                 break;
             }
             queued += static_cast<std::size_t>(accepted);
             if (static_cast<std::size_t>(accepted) < count) {
+                full = true;
                 break;
             }
         }
+        auto const refused = out.size() - queued;
         counters.add(counters.sent, queued);
-        counters.add(counters.sendFailures, out.size() - queued);
+        counters.add(counters.sendFailures, refused);
+        if (full) {
+            counters.add(counters.queueFull, refused);
+        }
+        counters.interfaceDown.store(down, std::memory_order_relaxed);
         return queued;
     }
 
@@ -111,13 +136,7 @@ struct SocketCan final : CanTransport {
             for (int i = 0; i < arrived; ++i) {
                 auto const &frame = frames[static_cast<std::size_t>(i)];
                 if ((frame.can_id & CAN_ERR_FLAG) != 0) {
-                    counters.add(counters.errorFrames, 1);
-                    if ((frame.can_id & CAN_ERR_BUSOFF) != 0) {
-                        counters.busOff.store(true, std::memory_order_relaxed);
-                    }
-                    if ((frame.can_id & CAN_ERR_RESTARTED) != 0) {
-                        counters.busOff.store(false, std::memory_order_relaxed);
-                    }
+                    record(fromKernel(frame).data, frame.can_id);
                     continue;
                 }
                 if ((frame.can_id & CAN_RTR_FLAG) != 0) {
@@ -135,21 +154,39 @@ struct SocketCan final : CanTransport {
 
     bool waitReadable(Duration const timeout) noexcept override {
         auto request = pollfd{.fd = socket.fd, .events = POLLIN, .revents = 0};
-        auto const milliseconds = std::chrono::ceil<std::chrono::milliseconds>(timeout).count();
-        return ::poll(&request, 1, static_cast<int>(std::max<std::int64_t>(milliseconds, 0))) > 0;
+        auto const nanoseconds = std::max<std::int64_t>(timeout.count(), 0);
+        auto const span =
+            timespec{.tv_sec = nanoseconds / 1'000'000'000, .tv_nsec = nanoseconds % 1'000'000'000};
+        return ::ppoll(&request, 1, &span, nullptr) > 0;
     }
+
+    BusState busState() const noexcept override { return counters.busState.load(std::memory_order_relaxed); }
 
     TransportStatistics statistics() const noexcept override {
         return TransportStatistics{
             .sent = counters.sent.load(std::memory_order_relaxed),
             .received = counters.received.load(std::memory_order_relaxed),
             .sendFailures = counters.sendFailures.load(std::memory_order_relaxed),
+            .queueFull = counters.queueFull.load(std::memory_order_relaxed),
             .errorFrames = counters.errorFrames.load(std::memory_order_relaxed),
-            .busOff = counters.busOff.load(std::memory_order_relaxed),
+            .unacknowledged = counters.unacknowledged.load(std::memory_order_relaxed),
+            .busState = counters.busState.load(std::memory_order_relaxed),
+            .interfaceDown = counters.interfaceDown.load(std::memory_order_relaxed),
         };
     }
 
   private:
+    void record(std::array<std::uint8_t, 8> const &data, canid_t const id) noexcept {
+        counters.add(counters.errorFrames, 1);
+        auto const event = decodeErrorFrame(id, data);
+        if (event.state) {
+            counters.busState.store(*event.state, std::memory_order_relaxed);
+        }
+        if (event.unacknowledged) {
+            counters.add(counters.unacknowledged, 1);
+        }
+    }
+
     FileDescriptor socket;
     std::array<can_frame, kBatch> frames{};
     std::array<iovec, kBatch> vectors{};
@@ -159,7 +196,41 @@ struct SocketCan final : CanTransport {
 
 } // namespace
 
-Expected<std::unique_ptr<CanTransport>> openSocketCan(std::string const &interface) {
+std::string_view toString(BusState const state) noexcept {
+    switch (state) {
+    case BusState::Active:
+        return "active";
+    case BusState::Warning:
+        return "warning";
+    case BusState::Passive:
+        return "passive";
+    case BusState::Off:
+        return "off";
+    }
+    return "unknown";
+}
+
+BusEvent decodeErrorFrame(std::uint32_t const id, std::array<std::uint8_t, 8> const &data) noexcept {
+    auto event = BusEvent{.state = std::nullopt, .unacknowledged = (id & CAN_ERR_ACK) != 0};
+    if ((id & CAN_ERR_BUSOFF) != 0) {
+        event.state = BusState::Off;
+    } else if ((id & CAN_ERR_RESTARTED) != 0) {
+        event.state = BusState::Active;
+    } else if ((id & CAN_ERR_CRTL) != 0) {
+        auto const controller = data[1];
+        if ((controller & (CAN_ERR_CRTL_RX_PASSIVE | CAN_ERR_CRTL_TX_PASSIVE)) != 0) {
+            event.state = BusState::Passive;
+        } else if ((controller & (CAN_ERR_CRTL_RX_WARNING | CAN_ERR_CRTL_TX_WARNING)) != 0) {
+            event.state = BusState::Warning;
+        } else if ((controller & CAN_ERR_CRTL_ACTIVE) != 0) {
+            event.state = BusState::Active;
+        }
+    }
+    return event;
+}
+
+Expected<std::unique_ptr<CanTransport>> openSocketCan(std::string const &interface,
+                                                      SocketCanOptions const &options) {
     if (interface.empty() or interface.size() >= IFNAMSIZ) {
         return makeError(ErrorCode::InvalidArgument, "invalid CAN interface name '" + interface + "'");
     }
@@ -170,6 +241,24 @@ Expected<std::unique_ptr<CanTransport>> openSocketCan(std::string const &interfa
     }
     auto request = ifreq{};
     std::copy(interface.begin(), interface.end(), request.ifr_name);
+    if (::ioctl(socket.fd, SIOCGIFFLAGS, &request) < 0) {
+        return tl::make_unexpected(systemError(context + "not found"));
+    }
+    if ((request.ifr_flags & IFF_UP) == 0) {
+        return makeError(ErrorCode::Io, context + "is down; bring it up, e.g. 'sudo ip link set " +
+                                            interface + " up type can bitrate 1000000'");
+    }
+    if (::ioctl(socket.fd, SIOCGIFTXQLEN, &request) < 0) {
+        return tl::make_unexpected(systemError(context + "cannot read the transmit queue length"));
+    }
+    auto const queue = static_cast<std::size_t>(std::max(request.ifr_qlen, 0));
+    if (queue != 0 and queue < options.burst) {
+        return makeError(ErrorCode::InvalidConfig, context + "the transmit queue holds " +
+                                                       std::to_string(queue) + " frames but " +
+                                                       std::to_string(options.burst) +
+                                                       " go out at once; raise it, e.g. 'sudo ip link set " +
+                                                       interface + " txqueuelen 128'");
+    }
     if (::ioctl(socket.fd, SIOCGIFINDEX, &request) < 0) {
         return tl::make_unexpected(systemError(context + "not found"));
     }

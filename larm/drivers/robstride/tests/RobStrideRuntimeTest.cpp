@@ -84,7 +84,7 @@ TEST_F(RobStrideRuntimeTest, EnablesMovesGripsParksAndDisables) {
     }
 }
 
-TEST_F(RobStrideRuntimeTest, AFaultedActuatorLeavesTheOthersHolding) {
+TEST_F(RobStrideRuntimeTest, AFaultedActuatorLeavesTheOthersHoldingAndRecoversInPlace) {
     start();
     ASSERT_TRUE(run(session->enable()));
     ASSERT_TRUE(run(session->motion("arm")->moveToJoints({.position = armTarget(0.0), .speed = 1.0})));
@@ -103,11 +103,17 @@ TEST_F(RobStrideRuntimeTest, AFaultedActuatorLeavesTheOthersHolding) {
     EXPECT_NEAR(held.state.joints.position[1], 0.7, 0.02);
     EXPECT_NEAR(held.state.joints.position[2], 1.1, 0.02);
 
-    // Without brakes a faulted arm is disabled where it is, then cleared by the next enable.
-    ASSERT_TRUE(run(session->disable({.force = true})));
+    // The arm has no brakes, so the fault is cleared in place: only the dropped actuator is re-armed.
     ASSERT_TRUE(run(session->resetFault()));
-    ASSERT_TRUE(run(session->enable()));
     EXPECT_TRUE(motors->enabled(3));
+    for (std::size_t i : {0U, 1U, 2U, 4U, 5U, 6U}) {
+        EXPECT_TRUE(motors->enabled(i)) << i;
+    }
+    ASSERT_TRUE(eventually(*session, [](control::RobotSnapshot const &snapshot) {
+        return snapshot.power == hal::DrivePower::Enabled;
+    }));
+    EXPECT_EQ(session->latest().safety, control::SafetyState::Normal);
+    EXPECT_NEAR(session->latest().state.joints.position[1], 0.7, 0.02);
     ASSERT_TRUE(run(session->park()));
     ASSERT_TRUE(run(session->disable({})));
 }

@@ -107,9 +107,10 @@ struct SimulationIo final : hal::RealtimeIo {
         }
     }
 
-    void write(JointCommand const &command, hal::DrivePower const requested) noexcept override {
+    // Simulated actuators never drop out, so there is nothing to re-arm.
+    void write(JointCommand const &command, hal::PowerRequest const &requested) noexcept override {
         state->command = command;
-        state->power = requested;
+        state->power = requested.power;
     }
 
   private:

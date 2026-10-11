@@ -9,21 +9,25 @@ struct IdealPlant {
     std::uint64_t cycle{};
     RobotState state;
     JointCommand command;
-    DrivePower power = DrivePower::Disabled;
+    PowerRequest power;
+    JointMask dropped;
     bool feedbackLost{};
 
-    void step() noexcept {
-        auto const enabled = power == DrivePower::Enabled;
-        for (std::size_t i = 0; i < dofOf(state.joints.position); ++i) {
-            state.actuators[i].enabled = enabled;
+    void request(PowerRequest const &requested) noexcept {
+        if (requested.power == DrivePower::Disabled or requested.rearm != power.rearm) {
+            dropped.reset();
         }
-        if (enabled) {
-            state.joints.position = command.position;
-            state.joints.velocity = command.velocity;
-            state.joints.effort = command.effort;
-        } else {
-            state.joints.velocity.setZero();
-            state.joints.effort.setZero();
+        power = requested;
+    }
+
+    void step() noexcept {
+        for (std::size_t i = 0; i < dofOf(state.joints.position); ++i) {
+            auto const enabled = power.power == DrivePower::Enabled and not dropped.test(i);
+            state.actuators[i].enabled = enabled;
+            auto const j = idx(i);
+            state.joints.position[j] = enabled ? command.position[j] : state.joints.position[j];
+            state.joints.velocity[j] = enabled ? command.velocity[j] : 0.0;
+            state.joints.effort[j] = enabled ? command.effort[j] : 0.0;
         }
         time += period;
         ++cycle;
@@ -42,9 +46,9 @@ struct IdealIo final : RealtimeIo {
         out.isFresh = not plant->feedbackLost;
     }
 
-    void write(JointCommand const &command, DrivePower const requested) noexcept override {
+    void write(JointCommand const &command, PowerRequest const &requested) noexcept override {
         plant->command = command;
-        plant->power = requested;
+        plant->request(requested);
     }
 
   private:
@@ -92,8 +96,9 @@ struct IdealBackendImpl final : IdealBackend {
     RobotDriver &driver() override { return idealDriver; }
     Timeline &timeline() override { return idealTimeline; }
     void setFeedbackLost(bool const lost) noexcept override { plant.feedbackLost = lost; }
+    void dropActuator(std::size_t const actuator) noexcept override { plant.dropped.set(actuator); }
     JointCommand const &lastCommand() const noexcept override { return plant.command; }
-    DrivePower lastRequestedPower() const noexcept override { return plant.power; }
+    DrivePower lastRequestedPower() const noexcept override { return plant.power.power; }
 
   private:
     IdealPlant plant;

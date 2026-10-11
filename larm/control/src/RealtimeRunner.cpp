@@ -10,6 +10,7 @@ namespace larm::control {
 RealtimeRunner::RealtimeRunner(ControlCycle &cycle, hal::Timeline &timeline,
                                RealtimeRunnerConfig const &config)
     : thread{[this, &cycle, &timeline](std::stop_token const stop) {
+          cycle.prepareThread();
           while (not stop.stop_requested()) {
               cycle.tick();
               timeline.advance();
