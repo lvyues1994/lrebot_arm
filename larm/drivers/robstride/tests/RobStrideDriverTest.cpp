@@ -239,7 +239,8 @@ TEST_F(RobStrideDriverTest, EnableTimesOutAfterTheSameTimeWhateverThePeriod) {
         EXPECT_LE(attempts, expected + 2) << period.count() << " ms";
         EXPECT_FALSE(state.actuators[3].enabled);
         motors->setSilent(3, false);
-        cycle(hal::DrivePower::Disabled, 5);
+        // Through the quiet time of the motors just stopped.
+        cycle(hal::DrivePower::Disabled, 10);
     }
 }
 
@@ -264,6 +265,10 @@ TEST_F(RobStrideDriverTest, DisablingReturnsToPositionPolling) {
         EXPECT_FALSE(motors->enabled(i)) << i;
         EXPECT_FALSE(state.actuators[i].enabled) << i;
     }
+    // Stopped motors stay quiet for 20 ms, five cycles.
+    EXPECT_FALSE(state.isFresh);
+    cycle(hal::DrivePower::Disabled, 5);
+    EXPECT_TRUE(state.isFresh);
     auto const before = bus->sent.size();
     cycle(hal::DrivePower::Disabled, 2);
     EXPECT_EQ(sentOfType(FrameType::ReadParameter, before), 2 * profile.dof());

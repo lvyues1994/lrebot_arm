@@ -19,6 +19,8 @@ struct Motor {
     std::uint32_t faults{};
     std::int8_t runMode = kRunModeMotion;
     bool silent{};
+    // Batches of frames still left unanswered after a stop.
+    std::int64_t quietBatches{};
     MotionCommand command;
     double position{};
     double velocity{};
@@ -144,6 +146,9 @@ struct SimulatedMotorsImpl final : SimulatedMotors {
             counters.unacknowledged += frames.size();
             return frames.size();
         }
+        for (auto &motor : motors) {
+            motor.quietBatches = std::max<std::int64_t>(motor.quietBatches - 1, 0);
+        }
         for (auto const &frame : frames) {
             handle(frame);
         }
@@ -184,7 +189,7 @@ struct SimulatedMotorsImpl final : SimulatedMotors {
         }
         auto const found = std::find_if(motors.begin(), motors.end(),
                                         [&](Motor const &motor) { return motor.id == header->destination; });
-        if (found == motors.end() or found->silent) {
+        if (found == motors.end() or found->silent or found->quietBatches > 0) {
             return;
         }
         auto &motor = *found;
@@ -202,6 +207,10 @@ struct SimulatedMotorsImpl final : SimulatedMotors {
             }
             return reply(motor);
         case FrameType::Disable:
+            if (motor.mode == MotorMode::Run) {
+                // Counted down once before the next batch is handled.
+                motor.quietBatches = 1 + (options.quietAfterStop + options.step - Duration{1}) / options.step;
+            }
             motor.mode = MotorMode::Reset;
             if (frame.data[0] == 1) {
                 motor.flags = 0;

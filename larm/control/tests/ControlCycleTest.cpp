@@ -291,6 +291,24 @@ TEST_F(ControlCycleTest, FeedbackLossFaultsAndLatchesUntilReset) {
         [](SafetyChanged const &event) { return event.state == SafetyState::Normal; }));
 }
 
+TEST_F(ControlCycleTest, StaleFeedbackWhileDisabledOnlyKeepsTheArmFromEnabling) {
+    enable();
+    push(SetDrivePower{.power = DrivePower::Disabled});
+    run(3);
+    ASSERT_EQ(snapshot().power, DrivePower::Disabled);
+    auto const timeout = static_cast<int>(profile.safety.feedbackTimeoutCycles);
+    backend->setFeedbackLost(true);
+    run(5 * timeout);
+    EXPECT_FALSE(snapshot().state.isFresh);
+    EXPECT_EQ(snapshot().safety, SafetyState::Normal);
+
+    push(SetDrivePower{.power = DrivePower::Enabled});
+    run(timeout + 1);
+    EXPECT_EQ(snapshot().power, DrivePower::Disabled);
+    EXPECT_EQ(snapshot().safety, SafetyState::Faulted);
+    EXPECT_EQ(snapshot().fault, FaultCode::FeedbackLost);
+}
+
 TEST_F(ControlCycleTest, ResetReArmsADroppedActuatorWhileTheOthersHold) {
     enable();
     run(10);
