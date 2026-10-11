@@ -41,6 +41,7 @@ Ubuntu 24.04、GCC 13.3、ROS 2 Jazzy。Jazzy 软件包：Pinocchio 4.1.0、Coal
 - **lrclexec**：ROS 2 执行器作调度器（`TimerScheduler`，支持 LifecycleNode 与 `/clock`）；`execute_action`、`call_service`、`wait_message`；抢占式 Action 服务端 `make_action_server_preempt`（先排空旧任务再启动新任务）；`spin_with_scope`、`SignalStop`。
 - **lqtexec**：Qt 事件循环作调度器；`wait_signal`、`SignalChannel`；`ObjectScope`（工作随 QObject 生命周期收束）；`ThreadPoolScheduler`；`exec_with_scope`。
 - **co2**：C++14 宏实现的无栈协程，`Task`、`Generator`、`AsyncGenerator`、`stop_token`；经 lexec 桥可直接 `CO2_AWAIT` 一个 sender。
+- **stackfull**：C++14 有栈协程，栈切换用 Boost.Context 的 fcontext 汇编（已内置，不依赖 Boost）；协程层之上另有 M:N 调度器、epoll IO 与同步原语。larm 只用协程层 `stackfull::coro`：`makeCoroutine` 一次分配栈（mmap 加保护页），之后 `resume()` / `yield()` 不分配，切换约 5 ns；带 ASan/TSan 的协程切换标注。
 
 本次验证：lexec + co2 桥在 `-std=c++20` 下编译运行通过；C++20 下 lexec 默认引入 `<execution>`，随之引入 TBB，而 TBB 头文件与 Qt 的 `emit` 宏冲突。larm 不使用标准执行策略，因此在 `lexec::lexec` 目标上定义 `LEXEC_NO_STD_EXECUTION_POLICY`，所有使用者（包括 lrclexec、lqtexec）看到同一份配置；Studio 另外定义 `QT_NO_KEYWORDS`。lrclexec 与 lqtexec 都接受父工程提供的 `lexec::lexec`，整个程序只能有一个 lexec 提供者。`~/code/lockfree/fastqueue` 是按需分配节点的 MPMC 队列，不满足实时线程零分配的要求，不用于实时边界。
 
@@ -172,8 +173,9 @@ flowchart LR
 | lrclexec | larm_ros | 运行时节点的 Action 服务端（抢占语义）、状态发布循环、`spin_with_scope` + `SignalStop` 收束；Studio 侧的远程会话用 `execute_action` / `call_service`，Studio 的 ROS 线程用 `spin_with_scope` |
 | lqtexec | larm_studio | 面板操作的结果经 `then_on(ObjectScope, …)` 回 GUI 线程；面板持有 `ObjectScope`（面板关闭即停止它发起的运动）；停止按钮用 `wait_signal` 与操作 `when_any` 竞争；`SignalStop` + `exec_with_scope` 收束 |
 | co2 | 任务层 | 多步流程（抓放、标定例程、数据采集）、长循环；`CO2_AWAIT` 运动 API 返回的 sender |
+| stackfull（只用协程层） | RobStride 驱动 | 每个执行器的总线协议写成一个有栈协程，实时线程每周期同步 resume 一次（6.7） |
 
-实时线程内不使用其中任何一个。
+实时线程内不使用 lexec、lrclexec、lqtexec 与 co2。stackfull 的协程是例外：它由实时线程自己同步 resume，不经过调度器，栈在实时线程启动前分配，切换不分配内存、耗时固定。
 
 ## 5 核心契约
 
@@ -237,12 +239,18 @@ struct DriverCapabilities {
     bool hasBrakes{};
 };
 
+struct PowerRequest {
+    DrivePower power = DrivePower::Disabled;
+    // 每次复位故障加一：请驱动清除并重新使能掉线的执行器，其余执行器不受影响
+    std::uint32_t rearm{};
+};
+
 // 只在实时线程调用：不分配、不加锁、耗时有界
 struct RealtimeIo {
     virtual ~RealtimeIo() = default;
     virtual void read(RobotState &out) noexcept = 0;
     // 使能/失能也经由实时线程，保证总线只有一个写者；实际状态从 read() 返回
-    virtual void write(JointCommand const &command, DrivePower requested) noexcept = 0;
+    virtual void write(JointCommand const &command, PowerRequest const &power) noexcept = 0;
 };
 
 // 时间所有者：真机睡到下个周期；仿真推进物理并按策略节流
@@ -521,7 +529,12 @@ struct PoseGoal {
 
 - 职责：5.3、5.4 中的控制器、安全层、`ControlCycle`；`RealtimeRunner`（RAII：构造时建线程并设置调度策略、绑核、锁内存，析构时停止并 join，统计唤醒延迟和超时周期）。
 - 每周期的模型缓存：`ModelCache` 在每周期用当前 `q` 更新一次（FK、工具帧雅可比、重力力矩），控制器与安全层共用。
-- 执行器掉线（第 4 步加入）：已使能时某个执行器自行退出运行（电机故障等），控制周期报 `ActuatorFault`、中止所有目标，其余执行器以完整保持刚度加重力补偿停在当前位置（Degraded 阶段，对外报告为未使能），直到请求失能。机械臂没有抱闸，这比让其余关节一起松掉更安全。恢复步骤：失能（不在停放姿态时用强制失能）→ 复位故障 → 重新使能；重新使能时驱动先清除电机锁存的故障。
+- 执行器掉线（第 4 步加入）：已使能时某个执行器自行退出运行（电机故障等），控制周期报 `ActuatorFault`、中止所有目标，其余执行器以完整保持刚度加重力补偿停在当前位置（Degraded 阶段，对外报告为未使能），直到请求失能或原地恢复。机械臂没有抱闸，这比让其余关节一起松掉更安全。
+- 原地恢复（设计，实现中）：Degraded 时复位故障不必先失能。
+  - 控制周期把 `PowerRequest::rearm` 加一，驱动只对掉线的执行器清除故障、重新使能。
+  - 重新上电的关节从当前实测位置开始保持，刚度按 `enable_ramp` 单独爬升；其余关节始终满刚度。刚度爬升因此按关节计时：从失能上电时所有关节一起爬升，原地恢复时只有恢复的关节爬升。
+  - 全部执行器重新上电后回到 On，安全状态回到 Normal。恢复失败（电机仍不进入运行）时保持 Degraded 与 `ActuatorFault`，可以再次复位或失能。复位的等待上限因此延长到 1 s。
+  - 不自动重试；复位的前提不变：反馈新鲜、位置在限位内，所以不应答的执行器无法恢复。
 - `makeControlCycle` 拒绝短于驱动 `minPeriod` 的控制周期，`minPeriod` 由驱动按总线流量给出。
 - 验证：在 `IdealBackend` 和 MuJoCo 后端上的确定性测试：轨迹跟踪误差在界内、限位与限幅生效、取消时平滑减速、故障锁存与复位、控制器占用冲突被拒绝；替换 `malloc` 的测试保证运行中的控制周期不做堆分配。
 
@@ -539,7 +552,19 @@ struct PoseGoal {
 ### 6.7 larm_can 与 larm_robstride（第 4 步，离线部分已实现）
 
 - 职责：通过 SocketCAN 直接驱动 RobStride 电机的 `RobotDriver`。分两个目标：`larm_can`（`drivers/can`，与厂商无关）与 `larm_robstride`（`drivers/robstride`）。
-- `CanTransport`：非阻塞批量收发（`sendmmsg` / `recvmmsg`，缓冲预分配，实时线程可调用），错误帧只计数，并记录 bus-off；另有一个用于非实时代码的阻塞等待。`openSocketCan(interface)` 打开原始套接字；错误信息都带接口名。
+- `CanTransport`：非阻塞批量收发（`sendmmsg` / `recvmmsg`，缓冲预分配，实时线程可调用）；另有一个用于非实时代码的阻塞等待。`openSocketCan(interface)` 打开原始套接字；错误信息都带接口名。
+- 传输层改进（设计，实现中）：
+  - 总线状态：从错误帧跟踪 Active / Warning / Passive / Off（控制器状态位、bus-off、重启），另计"没有节点应答"（ACK 错误）的错误帧；实时线程可读。
+  - 发送失败分类：发送队列满（`ENOBUFS` / `EAGAIN`）与接口关闭（`ENETDOWN`）分开统计。
+  - 打开时检查接口已启用（`IFF_UP`），发送队列长度为 0（无队列的虚拟接口）或不少于每周期的帧数；错误信息给出修复命令（`ip link set ... up type can bitrate ...`、`txqueuelen`）。
+  - 非实时等待精确到微秒（`ppoll`）。
+- 驱动重构（设计，实现中）：每个执行器一个有栈协程（`stackfull::coro`，只用协程层），总线协议写成顺序代码；协议与收发分开，协程只产出帧、读执行器状态，不直接收发。
+  - 初始化在 `connect()` 中进行，内容不变（ping → `run_mode` → `zero_sta` → 关闭主动上报 → 写 CAN 超时），但各执行器并行推进。非实时循环把各协程发出的帧合成一批发送，最多等 1 ms 收一轮应答，交给等待它的协程；到期的请求按超时处理。初始化耗时从 7 个执行器串行的约 28 次往返降到约 4 次往返；失败时一次报出所有出问题的执行器。总线上出现 ACK 错误、且没有任何执行器应答时，直接报"总线上没有节点应答：电机是否上电、终端电阻是否接好"。
+  - 运行在 `write()` 中进行：每周期依次 resume 各执行器的协程一次，每次恰好产出一帧，再一次 `sendmmsg` 发出；`read()` 在下次 resume 前把应答写进执行器状态。协议流程见下一条，超时按时间线计时（使能、失能各 200 ms），与控制周期无关。
+  - 协议流程：失能时参数读轮询 → 请求使能：有锁存故障先清除，再发使能帧直到进入运行 → 运行中发运控帧 → 请求失能：发失能帧直到退出运行。自行退出运行或使能超时即掉线：持续发失能帧，直到请求失能，或 `rearm` 变化时回到使能流程。
+  - bus-off 时所有执行器报未使能、无应答。
+  - 约束：协程栈在 `connect()` 中分配（每个 64 KiB，带保护页）；实时线程里不创建、不销毁协程。协程体是永不返回的循环，只在重新 `connect()` 或驱动析构时（非实时）销毁，因为销毁挂起的协程要经异常展开。协议代码不分配、不抛异常。`connect()` 在实时线程启动前完成，同一协程不会被两个线程同时 resume。各执行器的阶段另存一个字段，供状态显示与诊断使用。
+  - 栈页：初始化阶段已运行过协程，用到的栈页已触碰；内存锁定（`mlockall`）留到上真机调优时与实时线程一起加入。
 - 编解码 `Codec`：纯函数，覆盖私有协议的运控（类型 1）、反馈（类型 2，以及主动上报类型 24）、使能（3）、失能（4，可清故障）、ping（0）、参数读（17）、参数写（18）、故障上报（21）、主动上报开关（24）。数值按手册把 [-max, max] 线性映射到 [0, 65535]，取最近整数。另有电机侧的 `encodeStatus` / `decodeMotion`，供模拟电机与测试使用。核对依据：
   - RobStride RS-00、RS-06 手册的帧格式。
   - motorbridge 项目的实现，及其实机抓到的固件版本应答。版本应答与反馈帧类型相同，按负载特征排除。
@@ -752,7 +777,7 @@ lrebot_arm/
 - 仓库根目录不放 CMakeLists.txt：colcon 会把它识别为一个包，不再向下发现 `larm_msgs` 等子包。
 - 模块是 STATIC 库：OBJECT 库的目标文件不会沿依赖链传递到最终链接。
 - 选项：已有 `LARM_WITH_MUJOCO`、`LARM_WITH_ROS`（CMake 预设中关闭，colcon 构建时打开）、`LARM_WITH_ROBSTRIDE`（Linux 上默认打开）、`LARM_WITH_STUDIO`（还需要 ROS 与 MuJoCo，且找到 Qt 6 Widgets 与 OpenGL 时才构建，否则只提示跳过；官方 Qt 需要加入 `CMAKE_PREFIX_PATH`）；后续加入 `LARM_WITH_PYTHON`、`LARM_WITH_ONNX`。训练机器可以只构建核心、仿真与训练模块。
-- 外部依赖：lexec、co2、lrclexec、lqtexec 由 FetchContent 按固定提交拉取并标记为 SYSTEM，lrclexec 与 lqtexec 复用顶层提供的 `lexec::lexec`；本地开发可用 `FETCHCONTENT_SOURCE_DIR_<NAME>` 指向本地仓库。Pinocchio 与 Ruckig 来自 ROS 安装目录，构建前需要 source ROS 环境；Pinocchio 的 CMake 配置会探测 numpy，因此预设与 `colcon.meta` 都指定系统 Python。
+- 外部依赖：lexec、co2、lrclexec、lqtexec、stackfull 由 FetchContent 按固定提交拉取并标记为 SYSTEM，lrclexec 与 lqtexec 复用顶层提供的 `lexec::lexec`；stackfull 标记为 `EXCLUDE_FROM_ALL`，只编译用到的协程层；本地开发可用 `FETCHCONTENT_SOURCE_DIR_<NAME>` 指向本地仓库。Pinocchio 与 Ruckig 来自 ROS 安装目录，构建前需要 source ROS 环境；Pinocchio 的 CMake 配置会探测 numpy，因此预设与 `colcon.meta` 都指定系统 Python。
 - 两条构建路径：`larm/` 下用 CMake 预设开发核心模块（不含 ROS 节点）；仓库根目录用 `colcon build --base-paths larm larm_msgs robots` 构建 ROS 工作区。安装时 MuJoCo 动态库随 larm 一起装进 `lib/`，可执行文件以 `$ORIGIN` 相对 RPATH 找到它。
 - TSan 预设带一份只针对 `libmujoco.so` 的抑制文件：预编译的 MuJoCo 未插桩，其加载模型时的内部线程池会产生误报。
 - `CMakePresets.json` 提供 debug、release、asan、tsan；sanitizer 预设使用 Clang，因为 MuJoCo 3.8 的 `mjsan.h` 在 GCC 13 下不合法。编译警告按项目 C++ 风格开启并视为错误。
@@ -786,6 +811,7 @@ lrebot_arm/
 3. **Studio**（已完成）：远程会话、`SceneMirror`、视口，以及会话、关节、笛卡尔、路径、夹爪面板。完成标准：脚本模式走通主要流程。
 4. **真机**：RobStride 驱动，按"只读 → 使能保持 → 单关节小幅运动 → 慢速轨迹"逐级上真机；实测总线负载与周期抖动，确定控制频率。离线部分已完成：驱动、调试探针、真机 launch，以及在模拟电机上的整栈演练。上真机的各级等 PCAN 连接、并经操作者逐级批准后进行（检查清单见 README）。
    - 插入项（已完成）：**末端坐标系与直线运动**（5.7）。完成标准：末端系点动连续两次 2 cm 等于一次 4 cm；直线运动中 TCP 偏离直线不超过 0.5 mm；奇异与不可达被拒绝并说明原因；ROS 与 Studio 可用，脚本模式包含末端系点动。
+   - 插入项（进行中）：**CAN 驱动重构**（6.7、6.5）。内容：有栈协程写协议、并行初始化、按时间计的超时、原地恢复、总线状态与接口检查。完成标准：模拟电机上一个执行器不应答时，初始化在一个应答超时内失败，并列出所有出问题的执行器；单个执行器故障后不失能即可复位并恢复，恢复期间其余关节保持满刚度；超时与控制周期无关；bus-off 视为全部掉线；零堆分配与 sanitizer 测试覆盖新驱动。
 5. **示教与模仿学习**：遥操作与拖动示教录制、MCAP → LeRobot 转换、Python 推理节点经流式关节目标部署；先仿真后真机。
 6. **强化学习**：learning 环境、larm_py、示例任务（末端到达），PPO 训练，ONNX 部署到仿真再到真机。
 
@@ -793,7 +819,7 @@ lrebot_arm/
 
 - **以 ros2_control 为实时内核**：控制器只能作为 controller_manager 插件运行，无法以每秒上万步的速度放进训练环境，训练与部署会形成两份控制代码；命令与状态接口以字符串命名。MoveIt 兼容性通过 FollowJointTrajectory Action 获得。
 - **MuJoCo 作为独立进程，经 ROS 话题或 TCP 与控制器同步**：物理推进的关键链上出现 DDS、序列化和进程调度，时间所有权不清，结果不可重放。
-- **实时线程内使用 sender 或协程**：operation 的分配和完成时机不受控，无法保证周期内有界。
+- **实时线程内使用 sender 或无栈协程**：operation 与协程帧的分配、完成时机不受控，无法保证周期内有界。RobStride 驱动里的有栈协程不在此列：栈预先分配，由实时线程同步 resume，不经过任何调度器。
 - **以 Python 为运行时**：GIL 与解释器抖动不适合周期控制；Python 留在训练和脚本层。
 - **Studio 内嵌运行时与仿真（单进程）**：界面崩溃会连带停掉机器人控制；而真机场景下界面本来就是客户端。保留 `RobotSession` 接口，将来如需单进程模式可以加入本地实现。
 - **以 URDF 的 8 个关节（含两个指关节）作为控制空间**：两个指关节由同一个电机驱动，不能独立控制；控制空间取 7 个可驱动自由度，耦合交给传动与 MJCF 约束。
