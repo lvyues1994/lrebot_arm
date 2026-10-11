@@ -41,6 +41,8 @@ constexpr double kMaxJogRadians = 0.2;
 constexpr double kJogSpeed = 0.2;
 constexpr double kRestToleranceRadian = 0.1;
 constexpr auto kSamplePeriod = std::chrono::milliseconds{20};
+// How long the disabled arm is still sampled before the statistics are taken.
+constexpr auto kObserveDisabled = std::chrono::milliseconds{500};
 
 enum ExitCode : int { kOk = 0, kFailed = 1, kUsage = 2, kRefused = 3 };
 
@@ -480,13 +482,17 @@ struct Probe {
         if (not succeeded(session.disable({}), "disable", Interruptible::No)) {
             code = kFailed;
         }
+        std::this_thread::sleep_for(kObserveDisabled);
         report(running);
         return code;
     }
 
     void report(Running const &running) const {
         auto const statistics = running.backend->driver().statistics();
+        auto const latest = running.session->latest();
         emit(JsonLine{"statistics"}
+                 .field("fault", larm::control::toString(latest.fault))
+                 .field("fresh", latest.state.isFresh)
                  .field("cycles", statistics.cycles)
                  .field("missed_replies", statistics.missedReplies)
                  .field("foreign_frames", statistics.foreignFrames)

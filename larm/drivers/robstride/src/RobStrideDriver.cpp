@@ -60,6 +60,7 @@ struct RobStrideDriverImpl final : RobStrideDriver {
         discardPending();
         auto const unacknowledged = transport->statistics().unacknowledged;
         input = detail::CycleInput{};
+        sentBefore = false;
         for (auto &protocol : protocols) {
             if (auto started = protocol->start(); not started) {
                 return tl::make_unexpected(started.error());
@@ -126,7 +127,7 @@ struct RobStrideDriverImpl final : RobStrideDriver {
             };
             if (not motor.replied) {
                 fresh = false;
-                ++missed;
+                missed += sentBefore ? 1 : 0;
             }
             motor.replied = false;
         }
@@ -145,6 +146,7 @@ struct RobStrideDriverImpl final : RobStrideDriver {
             outgoing[i] = protocol.takeFrame().value_or(protocol.poll());
         }
         transport->send({outgoing.data(), protocols.size()});
+        sentBefore = true;
     }
 
   private:
@@ -295,6 +297,8 @@ struct RobStrideDriverImpl final : RobStrideDriver {
     std::array<CanFrame, kMaxDof> outgoing{};
     std::array<CanFrame, kReceiveBatch> incoming{};
     std::atomic<std::uint64_t> cycles{0};
+    // The first cycle reads before anything was asked; its silence is not a missed reply.
+    bool sentBefore{};
     std::atomic<std::uint64_t> missedReplies{0};
     std::atomic<std::uint64_t> foreignFrames{0};
 };

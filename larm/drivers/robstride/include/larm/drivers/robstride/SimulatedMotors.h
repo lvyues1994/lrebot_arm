@@ -3,6 +3,7 @@
 #include <larm/drivers/can/CanTransport.h>
 #include <larm/drivers/robstride/DriverConfig.h>
 
+#include <array>
 #include <functional>
 #include <memory>
 #include <span>
@@ -19,12 +20,15 @@ struct SimulatedMotorsOptions {
     std::function<void(std::span<double const> position, std::span<double> torque)> load;
     // Initial motor positions; zeros when empty.
     std::vector<double> position;
+    // Mechanical stops of each motor, {lower, upper} in motor units; none when empty.
+    std::vector<std::array<double, 2>> stops;
 };
 
 // RobStride motors answering on an in-process bus, for tests and rehearsals without hardware. Each
 // motor runs the motion law t = kp (p - q) + kd (v - dq) + t_ff while enabled and stays still while
-// disabled, as if resting on its support. The bus does not allocate after construction, so a control
-// loop may run on it while another thread inspects the motors or injects faults.
+// disabled, as if resting on its support; an enabled motor that reaches a stop halts there. The bus
+// does not allocate after construction, so a control loop may run on it while another thread inspects
+// the motors or injects faults.
 struct SimulatedMotors {
     virtual ~SimulatedMotors() = default;
     // The bus endpoint for the driver; valid while this object lives.

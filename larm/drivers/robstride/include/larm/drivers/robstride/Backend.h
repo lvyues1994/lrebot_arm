@@ -17,7 +17,8 @@ struct RobStrideBackend : hal::Backend {
 // The arm on the SocketCAN interface named in the profile's driver section.
 Expected<std::unique_ptr<RobStrideBackend>> makeRobStrideBackend(RobotProfile const &profile);
 
-// The same driver in front of simulated motors, for rehearsing hardware procedures.
+// The same driver in front of simulated motors, for rehearsing hardware procedures. Unless the options
+// give stops, the joints stop at their position limits, where the arm rests on its mechanical stops.
 Expected<std::unique_ptr<RobStrideBackend>> makeSimulatedRobStrideBackend(RobotProfile const &profile,
                                                                           SimulatedMotorsOptions options);
 

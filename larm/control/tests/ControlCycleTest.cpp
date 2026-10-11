@@ -161,12 +161,17 @@ TEST_F(ControlCycleTest, StaysPassiveUntilEnabledThenRampsStiffness) {
     run(60);
     EXPECT_FALSE(powered());
     auto const halfway = backend->lastCommand().stiffness[1];
+    auto const halfwayEffort = backend->lastCommand().effort[1];
     EXPECT_GT(halfway, 0.0);
     EXPECT_LT(halfway, profile.joints[1].gains.stiffness);
 
     enable();
     EXPECT_DOUBLE_EQ(backend->lastCommand().stiffness[1], profile.joints[1].gains.stiffness);
     EXPECT_TRUE(backend->lastCommand().position.isApprox(clearancePose()));
+    // The gravity feedforward ramps with the stiffness.
+    auto const fullEffort = backend->lastCommand().effort[1];
+    ASSERT_GT(std::abs(fullEffort), 0.1);
+    EXPECT_NEAR(halfwayEffort / fullEffort, halfway / profile.joints[1].gains.stiffness, 1e-3);
     EXPECT_EQ(snapshot().power, DrivePower::Enabled);
 }
 

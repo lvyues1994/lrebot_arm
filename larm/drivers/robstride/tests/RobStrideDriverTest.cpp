@@ -272,6 +272,7 @@ TEST_F(RobStrideDriverTest, DisablingReturnsToPositionPolling) {
 
 TEST_F(RobStrideDriverTest, MissingRepliesMakeTheFeedbackStale) {
     enable();
+    EXPECT_EQ(driver->statistics().missedReplies, 0u);
     motors->setSilent(4, true);
     cycle(hal::DrivePower::Enabled, 2);
     EXPECT_FALSE(state.isFresh);

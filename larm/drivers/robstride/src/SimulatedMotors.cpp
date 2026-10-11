@@ -253,6 +253,14 @@ struct SimulatedMotorsImpl final : SimulatedMotors {
                     (motor.torque + load[i] - options.viscousFriction * motor.velocity) / options.inertia;
                 motor.velocity += acceleration * dt;
                 motor.position += motor.velocity * dt;
+                if (i < options.stops.size()) {
+                    auto const [lower, upper] = options.stops[i];
+                    if (auto const stopped = std::clamp(motor.position, lower, upper);
+                        stopped != motor.position) {
+                        motor.position = stopped;
+                        motor.velocity = 0.0;
+                    }
+                }
             }
         }
     }

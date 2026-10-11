@@ -1,5 +1,7 @@
 #include <larm/drivers/robstride/Backend.h>
 
+#include <algorithm>
+
 namespace larm::drivers::robstride {
 namespace {
 
@@ -44,6 +46,15 @@ Expected<std::unique_ptr<RobStrideBackend>> makeSimulatedRobStrideBackend(RobotP
         return tl::make_unexpected(config.error());
     }
     options.step = profile.controlPeriod;
+    if (options.stops.empty()) {
+        for (auto const &actuator : config->actuators) {
+            auto const &limits = profile.joints[actuator.joint].limits;
+            auto const &[scale, offset] = actuator.transmission;
+            auto stop = std::array{(limits.lower - offset) / scale, (limits.upper - offset) / scale};
+            std::sort(stop.begin(), stop.end());
+            options.stops.push_back(stop);
+        }
+    }
     auto motors = makeSimulatedMotors(*config, std::move(options));
     auto transport = motors->transport();
     return std::unique_ptr<RobStrideBackend>{std::make_unique<RobStrideBackendImpl>(

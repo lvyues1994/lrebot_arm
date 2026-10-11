@@ -179,7 +179,9 @@ struct ControlCycleImpl final : ControlCycle {
         }
     }
 
-    // Stiffness fraction of a powered joint.
+    // Fraction of the holding stiffness, damping and gravity feedforward of a powered joint. The
+    // feedforward ramps too: a model heavier than the arm would otherwise lift it off its rest before
+    // the stiffness can hold it.
     double rampScale(std::size_t const joint) const noexcept {
         if (not ramping.test(joint) or enableRamp <= Duration{0}) {
             return 1.0;
@@ -360,7 +362,7 @@ struct ControlCycleImpl final : ControlCycle {
             auto const scale = powered.test(i) ? rampScale(i) : 0.0;
             command.position[j] = holdTarget[j];
             command.velocity[j] = 0.0;
-            command.effort[j] = powered.test(i) ? cache.gravity[j] : 0.0;
+            command.effort[j] = scale * cache.gravity[j];
             command.stiffness[j] = scale * hold.stiffness[j];
             command.damping[j] = scale * hold.damping[j];
         }
