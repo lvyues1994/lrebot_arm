@@ -9,8 +9,9 @@
 //   jog JOINT RADIANS [--speed FRACTION] --confirm-motion
 //                                 enable, move one arm joint by at most 0.2 rad and back slowly, disable;
 //                                 FRACTION of the joint limits is at most 0.2, the default
-//   grip METERS --confirm-motion  enable, open (positive) or close the gripper by at most 0.01 m and
-//                                 back, disable
+//   grip METERS [--effort NEWTONS] --confirm-motion
+//                                 enable, open (positive) or close the gripper by at most 0.01 m and
+//                                 back, disable; the effort limit is at most the profile's, the default
 //
 // --joints keeps only those joints of the profile, with their actuators: the other motors are never
 // addressed, neither read nor powered. Writes one JSON object per line. Commands that power the motors
@@ -56,6 +57,8 @@ struct Options {
     // Empty: every joint of the profile.
     std::vector<std::string> joints;
     double speed = kJogSpeed;
+    // Gripper effort limit for grip; the profile's when empty.
+    std::optional<double> effort;
     std::string command;
     std::vector<std::string> arguments;
     bool confirmPower{};
@@ -81,7 +84,7 @@ std::optional<Options> parse(int const argc, char **argv) {
             return i + 1 < argc ? std::optional<std::string>{argv[++i]} : std::nullopt;
         };
         if (argument == "--profile" or argument == "--output" or argument == "--rt-priority" or
-            argument == "--joints" or argument == "--speed") {
+            argument == "--joints" or argument == "--speed" or argument == "--effort") {
             auto const value = next();
             if (not value) {
                 return std::nullopt;
@@ -97,6 +100,13 @@ std::optional<Options> parse(int const argc, char **argv) {
                 if (not(stream >> options.speed) or not(options.speed > 0.0 and options.speed <= kJogSpeed)) {
                     return std::nullopt;
                 }
+            } else if (argument == "--effort") {
+                auto stream = std::istringstream{*value};
+                auto effort = 0.0;
+                if (not(stream >> effort) or not(effort > 0.0)) {
+                    return std::nullopt;
+                }
+                options.effort = effort;
             } else {
                 auto stream = std::istringstream{*value};
                 if (not(stream >> options.rtPriority)) {
@@ -608,8 +618,7 @@ struct Probe {
         return finish(*running, ok ? kOk : kFailed);
     }
 
-    // Opens (positive) or closes the gripper by `step` from where it is, and back, with the profile's
-    // effort limit.
+    // Opens (positive) or closes the gripper by `step` from where it is, and back.
     int grip(double const step) {
         if (not options.confirmMotion) {
             return fail("grip moves the gripper; add --confirm-motion", kUsage);
@@ -623,6 +632,11 @@ struct Probe {
         }
         auto const joint = profile.groups[*group].joints.front();
         auto const &limits = profile.joints[joint].limits;
+        auto const effort = options.effort.value_or(limits.effort);
+        if (effort > limits.effort) {
+            return fail("the profile limits the gripper effort to " + std::to_string(limits.effort) + " N",
+                        kUsage);
+        }
 
         auto running = startRuntime();
         if (not running) {
@@ -639,10 +653,9 @@ struct Probe {
         }
         auto const sampling = sampler(*running->session);
         auto *const hand = running->session->gripper("gripper");
-        auto const ok =
-            succeeded(running->session->enable(), "enable") and
-            gripped(hand->grip({.position = start + step, .maxEffort = limits.effort}), "grip out") and
-            gripped(hand->grip({.position = start, .maxEffort = limits.effort}), "grip back");
+        auto const ok = succeeded(running->session->enable(), "enable") and
+                        gripped(hand->grip({.position = start + step, .maxEffort = effort}), "grip out") and
+                        gripped(hand->grip({.position = start, .maxEffort = effort}), "grip back");
         return finish(*running, ok ? kOk : kFailed);
     }
 
@@ -677,7 +690,7 @@ void usage() {
            "                         [--rt-priority N] COMMAND\n"
            "  scan\n  monitor SECONDS\n  hold SECONDS --confirm-power\n"
            "  jog JOINT RADIANS [--speed FRACTION<=0.2] --confirm-motion\n"
-           "  grip METERS --confirm-motion\n";
+           "  grip METERS [--effort NEWTONS] --confirm-motion\n";
 }
 
 } // namespace
