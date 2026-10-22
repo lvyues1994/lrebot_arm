@@ -117,6 +117,9 @@ struct GripperApi {
     virtual Async<GripResult> grip(GripGoal goal) = 0;
 };
 
+// Without `force`, `disable` needs every revolute joint this close to the rest pose.
+inline constexpr double kRestToleranceRadian = 0.05;
+
 struct DisableOptions {
     // Disable even away from the rest pose. The arm has no brakes and will fall.
     bool force{};

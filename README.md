@@ -85,7 +85,7 @@ larm_driver_probe --profile $P jog joint1 0.1 --confirm-motion --output jog.json
 larm_driver_probe --profile $P --joints joint1,joint2 jog joint2 0.05 --speed 0.05 --confirm-motion
 ```
 
-`--joints` 只保留列出的关节及其电机，其余电机不收任何帧，可以逐个电机上电调试。`jog` 的 `--speed` 是关节速度上限的比例，最大也是默认值 0.2；0.05 约为 0.1 rad/s。`hold` 和 `jog` 在机械臂不在停放姿态、反馈不全或已有故障时拒绝执行。Ctrl+C 中断运动后，探针会把机械臂停放并失能；这一收尾不再被打断，紧急情况用硬件急停。
+`--joints` 只保留列出的关节及其电机，其余电机不收任何帧，可以逐个电机上电调试。`jog` 的 `--speed` 是关节速度上限的比例，最大也是默认值 0.2；0.05 约为 0.1 rad/s。`hold` 和 `jog` 在机械臂不在停放姿态（每个转动关节偏离不超过 0.05 rad，与运行时允许失能的条件相同）、反馈不全或已有故障时拒绝执行。运动失败或 Ctrl+C 中断后，探针会把机械臂停放并失能；这一收尾不再被打断，紧急情况用硬件急停。停放不成功时电机保持使能，程序退出后仍按最后的指令保持手臂，探针会输出 `warning`：托住手臂再拍急停。运动测试时不要托扶机械臂：手的支撑会改变重力负载，使关节偏离目标而判为未到位。
 
 运行时节点接真机：`ros2 launch rebot_b601 robot.launch.py`（`rt_priority:=80` 使用 SCHED_FIFO，需要相应权限；`rviz:=true` 打开 RViz）。Studio 可以用 `ros2 run larm larm_studio --profile $P` 连接。
 

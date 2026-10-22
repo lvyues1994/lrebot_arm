@@ -19,7 +19,6 @@
 namespace larm::runtime {
 namespace {
 
-constexpr double kRestToleranceRadian = 0.05;
 // Long enough for the driver to re-arm actuators that dropped out.
 constexpr Duration kResetTimeout = std::chrono::seconds{1};
 // Largest joint motion between two self-collision checks of a trajectory.

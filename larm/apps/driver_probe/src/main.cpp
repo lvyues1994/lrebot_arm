@@ -39,7 +39,6 @@ namespace robstride = larm::drivers::robstride;
 
 constexpr double kMaxJogRadians = 0.2;
 constexpr double kJogSpeed = 0.2;
-constexpr double kRestToleranceRadian = 0.1;
 constexpr auto kSamplePeriod = std::chrono::milliseconds{20};
 // How long the disabled arm is still sampled before the statistics are taken.
 constexpr auto kObserveDisabled = std::chrono::milliseconds{500};
@@ -382,18 +381,27 @@ struct Probe {
         return running;
     }
 
-    // Joints away from the rest pose, by name; the gripper is not checked.
+    // Joints too far from the rest pose for the runtime to disable, by name; the gripper is not checked.
     std::vector<std::string> awayFromRest(larm::control::RobotSnapshot const &snapshot) const {
         auto away = std::vector<std::string>{};
         for (std::size_t i = 0; i < profile.dof(); ++i) {
             auto const j = larm::idx(i);
             if (profile.joints[i].unit == larm::JointUnit::Radian and
                 std::abs(snapshot.state.joints.position[j] - profile.safety.restPose[j]) >
-                    kRestToleranceRadian) {
+                    larm::runtime::kRestToleranceRadian) {
                 away.push_back(profile.joints[i].name);
             }
         }
         return away;
+    }
+
+    bool anyPowered(larm::control::RobotSnapshot const &snapshot) const {
+        for (std::size_t i = 0; i < profile.dof(); ++i) {
+            if (snapshot.state.actuators[i].enabled) {
+                return true;
+            }
+        }
+        return snapshot.power == larm::hal::DrivePower::Enabled;
     }
 
     // Waits for fresh feedback, then checks the arm rests without faults.
@@ -472,17 +480,28 @@ struct Probe {
     // even after Ctrl+C; the hardware emergency stop is the way to interrupt it.
     int finish(Running &running, int code) const {
         auto &session = *running.session;
-        auto const latest = session.latest();
-        if (latest.power == larm::hal::DrivePower::Enabled and not awayFromRest(latest).empty() and
-            not succeeded(session.park(), "park", Interruptible::No)) {
-            emit(JsonLine{"warning"}.field("message", "the arm is not at rest and stays enabled, holding"));
-            report(running);
-            return kFailed;
+        if (auto const latest = session.latest(); latest.power == larm::hal::DrivePower::Enabled and
+                                                  not awayFromRest(latest).empty() and
+                                                  not succeeded(session.park(), "park", Interruptible::No)) {
+            code = kFailed;
         }
-        if (not succeeded(session.disable({}), "disable", Interruptible::No)) {
+        // A park that ends short of its goal may still leave the arm close enough to disable.
+        if (awayFromRest(session.latest()).empty() and
+            not succeeded(session.disable({}), "disable", Interruptible::No)) {
             code = kFailed;
         }
         std::this_thread::sleep_for(kObserveDisabled);
+        if (auto const latest = session.latest(); anyPowered(latest)) {
+            auto names = std::string{};
+            for (auto const &name : awayFromRest(latest)) {
+                names += (names.empty() ? "" : ", ") + name;
+            }
+            emit(JsonLine{"warning"}.field(
+                "message", "the motors stay enabled and hold the arm after this program ends" +
+                               (names.empty() ? std::string{} : " (away from rest: " + names + ")") +
+                               "; support the arm, then press the emergency stop"));
+            code = kFailed;
+        }
         report(running);
         return code;
     }
