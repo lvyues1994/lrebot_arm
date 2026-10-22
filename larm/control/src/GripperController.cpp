@@ -26,12 +26,18 @@ struct GripperControllerImpl final : Controller {
         auto const velocity = context.state.joints.velocity[j];
         auto const goal = stopping ? reference : config.target;
         auto const step = config.speed * toSeconds(context.period);
+        auto const previous = reference;
         reference =
             std::abs(goal - reference) <= step ? goal : reference + std::copysign(step, goal - reference);
+        auto const referenceVelocity = (reference - previous) / toSeconds(context.period);
 
-        auto const reach = config.stiffness > 0.0 ? config.maxEffort / config.stiffness : 0.0;
-        out.position[j] = position + std::clamp(reference - position, -reach, reach);
-        out.velocity[j] = 0.0;
+        // The impedance force toward the moving reference, scaled down to the effort limit. Damping acts
+        // against the reference's velocity, not against motion, so it does not slow the stroke.
+        auto const force =
+            config.stiffness * (reference - position) + config.damping * (referenceVelocity - velocity);
+        auto const scale = std::abs(force) > config.maxEffort ? config.maxEffort / std::abs(force) : 1.0;
+        out.position[j] = position + scale * (reference - position);
+        out.velocity[j] = velocity + scale * (referenceVelocity - velocity);
         out.effort[j] = context.model.gravity[j];
         out.stiffness[j] = config.stiffness;
         out.damping[j] = config.damping;

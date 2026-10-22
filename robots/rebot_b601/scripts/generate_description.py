@@ -52,6 +52,8 @@ ROBOT_NAME = "rebot_b601_rs"
 
 # Armature and damping are estimates. Friction loss for joint2-joint5 comes from
 # the RS gravity calibration (2026-07-17); joint1, joint6 and the fingers are estimates.
+# joint_left carries the gripper motor: the RS-00 output inertia of the wrist joints (0.005 kg m^2)
+# seen through the 7.353 mm/rad pinion, 0.005 / 0.007353^2 = 92 kg.
 JOINT_PARAMS = {
     "joint1": {"armature": "0.01", "damping": "0.05", "frictionloss": "0.3"},
     "joint2": {"armature": "0.01", "damping": "0.05", "frictionloss": "0.53"},
@@ -59,7 +61,7 @@ JOINT_PARAMS = {
     "joint4": {"armature": "0.005", "damping": "0.02", "frictionloss": "0.3"},
     "joint5": {"armature": "0.005", "damping": "0.02", "frictionloss": "0.21"},
     "joint6": {"armature": "0.005", "damping": "0.02", "frictionloss": "0.2"},
-    "joint_left": {"armature": "0.05", "damping": "2", "frictionloss": "1"},
+    "joint_left": {"armature": "92", "damping": "2", "frictionloss": "1"},
     "joint_right": {"armature": "0.05", "damping": "2", "frictionloss": "1"},
 }
 

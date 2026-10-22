@@ -9,6 +9,8 @@
 //   jog JOINT RADIANS [--speed FRACTION] --confirm-motion
 //                                 enable, move one arm joint by at most 0.2 rad and back slowly, disable;
 //                                 FRACTION of the joint limits is at most 0.2, the default
+//   grip METERS --confirm-motion  enable, open (positive) or close the gripper by at most 0.01 m and
+//                                 back, disable
 //
 // --joints keeps only those joints of the profile, with their actuators: the other motors are never
 // addressed, neither read nor powered. Writes one JSON object per line. Commands that power the motors
@@ -38,6 +40,7 @@ using larm::probe::ReadOnlyBus;
 namespace robstride = larm::drivers::robstride;
 
 constexpr double kMaxJogRadians = 0.2;
+constexpr double kMaxGripMeters = 0.01;
 constexpr double kJogSpeed = 0.2;
 constexpr auto kSamplePeriod = std::chrono::milliseconds{20};
 // How long the disabled arm is still sampled before the statistics are taken.
@@ -598,6 +601,68 @@ struct Probe {
             succeeded(arm->moveToJoints({.position = rest, .speed = options.speed}), "jog back");
         return finish(*running, ok ? kOk : kFailed);
     }
+
+    // Opens (positive) or closes the gripper by `step` from where it is, and back, with the profile's
+    // effort limit.
+    int grip(double const step) {
+        if (not options.confirmMotion) {
+            return fail("grip moves the gripper; add --confirm-motion", kUsage);
+        }
+        if (not(std::abs(step) <= kMaxGripMeters)) {
+            return fail("the grip step is limited to 0.01 m", kUsage);
+        }
+        auto const group = profile.findGroup("gripper");
+        if (not group) {
+            return fail("the profile has no gripper group; add the gripper to --joints", kUsage);
+        }
+        auto const joint = profile.groups[*group].joints.front();
+        auto const &limits = profile.joints[joint].limits;
+
+        auto running = startRuntime();
+        if (not running) {
+            return fail(running.error().message);
+        }
+        if (auto const refused = checkStart(*running->session); refused != kOk) {
+            return refused;
+        }
+        auto const start = running->session->latest().state.joints.position[larm::idx(joint)];
+        if (start + step < limits.lower or start + step > limits.upper) {
+            return fail("the gripper at " + std::to_string(start) + " m cannot move " + std::to_string(step) +
+                            " m within its limits; step the other way",
+                        kUsage);
+        }
+        auto const sampling = sampler(*running->session);
+        auto *const hand = running->session->gripper("gripper");
+        auto const ok =
+            succeeded(running->session->enable(), "enable") and
+            gripped(hand->grip({.position = start + step, .maxEffort = limits.effort}), "grip out") and
+            gripped(hand->grip({.position = start, .maxEffort = limits.effort}), "grip back");
+        return finish(*running, ok ? kOk : kFailed);
+    }
+
+    template <class Sender> bool gripped(Sender &&sender, std::string_view const step) const {
+        try {
+            auto const result = lexec::sync_wait(lexec::write_env(
+                std::forward<Sender>(sender), lexec::prop{lexec::get_stop_token, stop->get_token()}));
+            if (not result) {
+                emit(JsonLine{"step"}.field("name", step).field("outcome", "stopped"));
+                return false;
+            }
+            auto const &[grip] = *result;
+            emit(JsonLine{"step"}
+                     .field("name", step)
+                     .field("outcome", grip.reachedGoal ? "succeeded" : "stalled")
+                     .field("position", grip.position)
+                     .field("effort", grip.effort));
+            return grip.reachedGoal;
+        } catch (std::exception const &error) {
+            emit(JsonLine{"step"}
+                     .field("name", step)
+                     .field("outcome", "failed")
+                     .field("message", error.what()));
+        }
+        return false;
+    }
 };
 
 void usage() {
@@ -605,7 +670,8 @@ void usage() {
         << "usage: larm_driver_probe --profile FILE [--joints J1,J2,...] [--simulated] [--output FILE]\n"
            "                         [--rt-priority N] COMMAND\n"
            "  scan\n  monitor SECONDS\n  hold SECONDS --confirm-power\n"
-           "  jog JOINT RADIANS [--speed FRACTION<=0.2] --confirm-motion\n";
+           "  jog JOINT RADIANS [--speed FRACTION<=0.2] --confirm-motion\n"
+           "  grip METERS --confirm-motion\n";
 }
 
 } // namespace
@@ -665,6 +731,9 @@ int main(int argc, char **argv) {
         }
         if (options->command == "jog" and arguments.size() == 2) {
             return probe.jog(arguments[0], std::stod(arguments[1]));
+        }
+        if (options->command == "grip" and arguments.size() == 1) {
+            return probe.grip(std::stod(arguments[0]));
         }
     } catch (std::exception const &error) {
         return probe.fail(error.what());

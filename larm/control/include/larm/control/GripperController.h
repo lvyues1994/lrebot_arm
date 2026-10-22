@@ -9,7 +9,8 @@ namespace larm::control {
 struct GripperControllerConfig {
     std::size_t joint{};
     double target{};
-    // The commanded offset from the measured position is limited so the impedance force stays below this.
+    // The commanded offsets from the measured position and velocity are limited so the impedance force
+    // stays below this.
     double maxEffort{};
     // Speed of the reference moving toward the target.
     double speed{};

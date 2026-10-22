@@ -405,13 +405,17 @@ TEST_F(ControlCycleTest, GripperReachesItsTarget) {
     EXPECT_NEAR(backend->lastCommand().position[6], 0.04, 0.001);
 }
 
-TEST_F(ControlCycleTest, GripperForceLimitBoundsTheImpedanceOffset) {
+TEST_F(ControlCycleTest, GripperForceLimitBoundsTheImpedanceForce) {
     enable();
     push(ActivateController{.goal = GoalId{13}, .controller = gripTo(0.0)});
-    run(5);
-    auto const &command = backend->lastCommand();
-    auto const offset = std::abs(command.position[6] - snapshot().state.joints.position[6]);
-    EXPECT_LE(command.stiffness[6] * offset, 5.0 + 1e-9);
+    for (int i = 0; i < 5; ++i) {
+        run(1);
+        auto const measured = snapshot().state.joints;
+        auto const &command = backend->lastCommand();
+        auto const force = command.stiffness[6] * (command.position[6] - measured.position[6]) +
+                           command.damping[6] * (command.velocity[6] - measured.velocity[6]);
+        EXPECT_LE(std::abs(force), 5.0 + 1e-6) << i;
+    }
 }
 
 TEST_F(ControlCycleTest, GripperStallsWhenItCannotReachTheTarget) {
