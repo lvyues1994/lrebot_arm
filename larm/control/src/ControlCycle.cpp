@@ -88,6 +88,7 @@ struct ControlCycleImpl final : ControlCycle {
         enforceLimits();
         io->write(command, hal::PowerRequest{requestedPower, rearm});
         publish(started);
+        flushEvents();
         flushRetired();
     }
 
@@ -447,7 +448,20 @@ struct ControlCycleImpl final : ControlCycle {
         }
     }
 
-    void emit(ControlEvent event) noexcept { static_cast<void>(channels->events.tryPush(std::move(event))); }
+    // Events wait for the end of the tick, so that whoever reads one sees the snapshot of its cycle.
+    void emit(ControlEvent event) noexcept {
+        if (staged == stagedEvents.size()) {
+            flushEvents();
+        }
+        stagedEvents[staged++] = std::move(event);
+    }
+
+    void flushEvents() noexcept {
+        for (std::size_t i = 0; i < staged; ++i) {
+            static_cast<void>(channels->events.tryPush(std::move(stagedEvents[i])));
+        }
+        staged = 0;
+    }
 
     JointMask claimedJoints() const noexcept {
         auto claimed = JointMask{};
@@ -488,6 +502,10 @@ struct ControlCycleImpl final : ControlCycle {
     ModelCache cache;
     RobotSnapshot snapshot;
     std::array<Slot, kMaxActiveControllers> slots{};
+    // A tick finishes at most every request it takes and every active goal, and changes power and
+    // safety a few times.
+    std::array<ControlEvent, kMaxRequestsPerCycle + kMaxActiveControllers + 4> stagedEvents{};
+    std::size_t staged{};
     std::array<std::unique_ptr<Controller>, kRetireBacklog> retireBacklog{};
     std::uint32_t staleCycles{};
     hal::DrivePower requestedPower = hal::DrivePower::Disabled;

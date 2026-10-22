@@ -152,6 +152,48 @@ struct ControlCycleTest : testing::Test {
     int retiredCount{};
 };
 
+// Forwards to another driver and, when the cycle writes (before it publishes its snapshot), takes the
+// events the cycle has made visible so far.
+struct PeekingDriver final : hal::RobotDriver, hal::RealtimeIo {
+    PeekingDriver(hal::RobotDriver &inner_, RuntimeChannels &channels_)
+        : inner{&inner_}, channels{&channels_} {}
+
+    hal::DriverCapabilities capabilities() const override { return inner->capabilities(); }
+    Expected<void> connect() override { return inner->connect(); }
+    void disconnect() noexcept override { inner->disconnect(); }
+    hal::RealtimeIo &io() override { return *this; }
+    void read(RobotState &out) noexcept override { inner->io().read(out); }
+    void write(JointCommand const &command, hal::PowerRequest const &power) noexcept override {
+        inner->io().write(command, power);
+        while (channels->events.tryPop()) {
+            ++earlyEvents;
+        }
+    }
+
+    hal::RobotDriver *inner;
+    RuntimeChannels *channels;
+    int earlyEvents{};
+};
+
+TEST_F(ControlCycleTest, EventsArriveAfterTheSnapshotOfTheirCycle) {
+    auto peeking = PeekingDriver{backend->driver(), *channels};
+    auto made = makeControlCycle(profile,
+                                 {.driver = &peeking, .model = robotModel.get(), .channels = channels.get()});
+    ASSERT_TRUE(made) << made.error().message;
+    auto &own = **made;
+    own.tick();
+    backend->timeline().advance();
+    // Rejected while disabled, the goal finishes in the tick that takes it.
+    push(ActivateController{.goal = GoalId{21},
+                            .controller = std::make_unique<FixedCommandController>(arm, 0.0, 0.0)});
+    own.tick();
+    EXPECT_EQ(peeking.earlyEvents, 0);
+    auto const event = channels->events.tryPop();
+    ASSERT_TRUE(event);
+    ASSERT_TRUE(std::holds_alternative<GoalFinished>(*event));
+    EXPECT_EQ(std::get<GoalFinished>(*event).goal, GoalId{21});
+}
+
 TEST_F(ControlCycleTest, StaysPassiveUntilEnabledThenRampsStiffness) {
     run(5);
     EXPECT_EQ(backend->lastRequestedPower(), DrivePower::Disabled);
