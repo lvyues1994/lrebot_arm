@@ -31,11 +31,12 @@ joints:
   - name: joint6
     limits: {position: [-3.14, 3.14], velocity: 3.0, acceleration: 8.0, jerk: 80.0, effort: 14.0}
     gains: {stiffness: 50.0, damping: 4.0}
-  # 夹爪以单指位移（米）表示，对应描述中的 joint_left。电机转角到位移的换算待标定，增益为仿真值。
+  # 夹爪以单指位移（米）表示，对应描述中的 joint_left；增益为仿真值。真机实测行程：闭合时电机约
+  # -0.01 rad，张开到头约 5.81 rad（按 7.353 mm/rad 为 42.7 mm），上限留出约 0.1 rad。
   - name: gripper
     description_joint: joint_left
     unit: meter
-    limits: {position: [0.0, 0.05], velocity: 0.05, acceleration: 0.5, jerk: 5.0, effort: 20.0}
+    limits: {position: [0.0, 0.042], velocity: 0.05, acceleration: 0.5, jerk: 5.0, effort: 20.0}
     gains: {stiffness: 2000.0, damping: 40.0}
 
 groups:
@@ -80,5 +81,6 @@ driver:
     - {joint: joint4, id: 0x04, model: rs-00}
     - {joint: joint5, id: 0x05, model: rs-00}
     - {joint: joint6, id: 0x06, model: rs-00}
-    # 小齿轮齿条：7.353 mm/rad（reBot-Isaacsim 夹爪实测）。方向与零点待真机标定。
+    # 小齿轮齿条：7.353 mm/rad（reBot-Isaacsim 夹爪实测）。真机核对：张开为电机正转，电机零点即闭合位置。
+    # 行程接近一圈，上电时夹爪张开超过约 23 mm 的读数由驱动按限位中点纠正整圈。
     - {joint: gripper, id: 0x07, model: rs-00, transmission: {scale: 0.007353, offset: 0.0}}

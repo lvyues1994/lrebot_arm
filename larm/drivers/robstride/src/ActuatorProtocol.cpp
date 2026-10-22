@@ -99,6 +99,11 @@ void ActuatorProtocol::setUp() {
         return fail(describe() + " has zero_sta " + std::to_string(zeroState->raw[0]) +
                     "; positions need 1 (-pi..pi), set and save it with MotorBridge Studio");
     }
+    auto const position = readParameter(parameter::kMechanicalPosition);
+    if (not position) {
+        return fail(describe() + " did not return parameter " + hex(parameter::kMechanicalPosition));
+    }
+    turnShift = turnCorrection(config, static_cast<double>(position->asFloat()));
 
     if (settings.disableActiveReport) {
         emit(encodeActiveReport(id, host, false));
@@ -226,7 +231,7 @@ CanFrame ActuatorProtocol::motion() const noexcept {
     auto const j = idx(config.joint);
     return encodeMotion(config.id,
                         MotionCommand{
-                            .position = (command.position[j] - offset) / scale,
+                            .position = (command.position[j] - offset) / scale - turnShift,
                             .velocity = command.velocity[j] / scale,
                             .stiffness = command.stiffness[j] * scale * scale,
                             .damping = command.damping[j] * scale * scale,

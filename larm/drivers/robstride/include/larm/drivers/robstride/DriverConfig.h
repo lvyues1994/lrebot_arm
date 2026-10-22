@@ -22,7 +22,15 @@ struct ActuatorConfig {
     std::uint8_t id{};
     MotorModel model{};
     Transmission transmission;
+    // Motor angle at the middle of the joint's limits. A motor reads its angle within (-pi, pi] when
+    // powered on; that reading is moved by whole turns to within half a turn of this angle, so a joint
+    // whose motor travels past +-pi (the gripper) reads right wherever it was at power-on.
+    double motorCenter{};
 };
+
+// Whole turns, in radians, that bring the motor angle `motor` read after power-on to within half a
+// turn of the actuator's `motorCenter`.
+double turnCorrection(ActuatorConfig const &actuator, double motor) noexcept;
 
 struct DriverConfig {
     std::string interface;

@@ -117,7 +117,7 @@ struct RobStrideDriverImpl final : RobStrideDriver {
             auto &protocol = *protocols[i];
             auto &motor = protocol.motor;
             auto const &[scale, offset] = protocol.config.transmission;
-            out.joints.position[idx(i)] = scale * motor.position + offset;
+            out.joints.position[idx(i)] = scale * (motor.position + protocol.turnShift) + offset;
             out.joints.velocity[idx(i)] = scale * motor.velocity;
             out.joints.effort[idx(i)] = motor.torque / scale;
             out.actuators[i] = ActuatorStatus{

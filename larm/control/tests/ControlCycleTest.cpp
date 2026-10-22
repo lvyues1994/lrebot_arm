@@ -395,14 +395,14 @@ std::unique_ptr<Controller> gripTo(double const target) {
 
 TEST_F(ControlCycleTest, GripperReachesItsTarget) {
     enable();
-    push(ActivateController{.goal = GoalId{12}, .controller = gripTo(0.045)});
+    push(ActivateController{.goal = GoalId{12}, .controller = gripTo(0.04)});
     for (int i = 0; i < 300 and not finished(GoalId{12}); ++i) {
         run(1);
     }
     ASSERT_TRUE(finished(GoalId{12}));
     EXPECT_EQ(finished(GoalId{12})->status, ControlStatus::Succeeded);
     run(1);
-    EXPECT_NEAR(backend->lastCommand().position[6], 0.045, 0.001);
+    EXPECT_NEAR(backend->lastCommand().position[6], 0.04, 0.001);
 }
 
 TEST_F(ControlCycleTest, GripperForceLimitBoundsTheImpedanceOffset) {

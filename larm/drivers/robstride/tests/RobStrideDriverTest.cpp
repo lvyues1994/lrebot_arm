@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdlib>
+#include <numbers>
 
 namespace larm::drivers::robstride {
 namespace {
@@ -95,7 +96,7 @@ struct RobStrideDriverTest : testing::Test {
 TEST_F(RobStrideDriverTest, ConnectChecksEveryActuator) {
     ASSERT_TRUE(driver->connect());
     EXPECT_EQ(sentOfType(FrameType::Ping), profile.dof());
-    EXPECT_EQ(sentOfType(FrameType::ReadParameter), 2 * profile.dof());
+    EXPECT_EQ(sentOfType(FrameType::ReadParameter), 3 * profile.dof());
     EXPECT_EQ(sentOfType(FrameType::ActiveReport), profile.dof());
     EXPECT_EQ(sentOfType(FrameType::Enable) + sentOfType(FrameType::Disable), 0u);
 
@@ -157,6 +158,23 @@ TEST_F(RobStrideDriverTest, PollsPositionsWithoutTouchingPowerWhileDisabled) {
     EXPECT_EQ(sentOfType(FrameType::ReadParameter, before), 4 * profile.dof());
     EXPECT_EQ(sentOfType(FrameType::Enable, before) + sentOfType(FrameType::Disable, before), 0u);
     EXPECT_EQ(state.stamp, TimePoint{std::chrono::milliseconds{12}});
+}
+
+TEST_F(RobStrideDriverTest, AGripperPoweredOnWideOpenReadsAndHoldsWhereItIs) {
+    // Wide open is 5.81 rad at the motor, past pi, so the motor reads a turn less after power-on.
+    auto const open = 5.81 - 2.0 * std::numbers::pi;
+    driver.reset();
+    motors = makeSimulatedMotors(config, {.position = {0.1, 0.2, 0.3, -0.1, 0.05, 0.0, open}});
+    auto tap = std::make_unique<Tap>(motors->transport());
+    bus = tap.get();
+    driver = makeRobStrideDriver(config, std::move(tap), clock);
+    enable();
+    EXPECT_NEAR(state.joints.position[6], 5.81 * 0.007353, 1e-5);
+    command.stiffness[6] = 2000.0;
+    command.damping[6] = 40.0;
+    cycle(hal::DrivePower::Enabled, 100);
+    EXPECT_NEAR(motors->position(6), open, 1e-3);
+    EXPECT_NEAR(state.joints.position[6], 5.81 * 0.007353, 1e-5);
 }
 
 TEST_F(RobStrideDriverTest, EnablesAndTracksImpedanceCommands) {

@@ -237,11 +237,11 @@ TEST_F(LocalRuntimeTest, FollowsATimedPathFromTheCurrentPosition) {
 }
 
 TEST_F(LocalRuntimeTest, GripsToAPosition) {
-    auto const result = run(hand->grip({.position = 0.045, .maxEffort = 10.0}));
+    auto const result = run(hand->grip({.position = 0.04, .maxEffort = 10.0}));
     ASSERT_TRUE(result);
     auto const &[grip] = *result;
     EXPECT_TRUE(grip.reachedGoal);
-    EXPECT_NEAR(grip.position, 0.045, 0.002);
+    EXPECT_NEAR(grip.position, 0.04, 0.002);
 }
 
 TEST_F(LocalRuntimeTest, StopRequestDeceleratesAndCompletesStopped) {

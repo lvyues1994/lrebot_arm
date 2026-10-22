@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdlib>
+#include <numbers>
 
 namespace larm::drivers::robstride {
 namespace {
@@ -108,6 +109,22 @@ TEST_F(RebotDriverConfig, RejectsTransmissionsThatPushLimitsOutOfRange) {
     expectRejected("joint 'gripper' position limits exceed");
     actuator("gripper")["transmission"]["scale"] = 0.0;
     expectRejected("non-zero");
+}
+
+TEST_F(RebotDriverConfig, TakesPowerOnAnglesInTheTurnAroundTheJointLimits) {
+    auto const config = parseDriverConfig(profile);
+    ASSERT_TRUE(config) << config.error().message;
+    auto const &gripper = config->actuators[6];
+    EXPECT_NEAR(gripper.motorCenter, 0.021 / 0.007353, 1e-9);
+    EXPECT_NEAR(turnCorrection(gripper, 5.81 - 2.0 * std::numbers::pi), 2.0 * std::numbers::pi, 1e-12);
+    EXPECT_EQ(turnCorrection(gripper, -0.02), 0.0);
+    EXPECT_EQ(turnCorrection(config->actuators[0], 2.7), 0.0);
+    EXPECT_EQ(turnCorrection(config->actuators[1], -0.01), 0.0);
+}
+
+TEST_F(RebotDriverConfig, RejectsAJointTravellingATurnOrMoreAtTheMotor) {
+    profile.joints[6].limits.upper = 0.05;
+    expectRejected("joint 'gripper' limits span");
 }
 
 TEST_F(RebotDriverConfig, RejectsOtherDriverTypes) {

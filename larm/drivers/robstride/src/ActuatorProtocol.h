@@ -82,6 +82,8 @@ struct ActuatorProtocol {
     ModelRanges const ranges;
     MotorState motor;
     Phase phase = Phase::Connecting;
+    // Whole turns added to the motor's angle, chosen at set-up (turnCorrection).
+    double turnShift{};
 
   private:
     enum class Enabled : std::uint8_t { Yes, Withdrawn, TimedOut };

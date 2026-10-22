@@ -218,11 +218,16 @@ struct Probe {
         return code;
     }
 
+    // A motor angle as read after power-on, as the driver maps it to its joint.
+    static double jointOf(robstride::ActuatorConfig const &actuator, double const motor) {
+        auto const &[scale, offset] = actuator.transmission;
+        return scale * (motor + robstride::turnCorrection(actuator, motor)) + offset;
+    }
+
     std::vector<double> motorToJoint(std::span<double const> const motor) const {
         auto joint = std::vector<double>(motor.size());
         for (std::size_t i = 0; i < motor.size(); ++i) {
-            auto const &[scale, offset] = config.actuators[i].transmission;
-            joint[i] = scale * motor[i] + offset;
+            joint[i] = jointOf(config.actuators[i], motor[i]);
         }
         return joint;
     }
@@ -279,8 +284,7 @@ struct Probe {
                 }
                 if (position) {
                     auto const motor = static_cast<double>(position->asFloat());
-                    auto const &[scale, offset] = actuator.transmission;
-                    line.field("motor_position", motor).field("joint_position", scale * motor + offset);
+                    line.field("motor_position", motor).field("joint_position", jointOf(actuator, motor));
                 }
                 ready = ready and runMode and runMode->asInt8() == robstride::kRunModeMotion and zeroState and
                         zeroState->raw[0] == 1;

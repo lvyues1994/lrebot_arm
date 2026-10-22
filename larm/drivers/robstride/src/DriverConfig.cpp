@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <initializer_list>
+#include <numbers>
 #include <set>
 
 namespace larm::drivers::robstride {
@@ -89,6 +90,19 @@ void checkRanges(JointSpec const &joint, ActuatorConfig const &actuator, std::st
     }
 }
 
+// The motor's power-on angle names one position only while the joint's travel stays within a turn.
+ActuatorConfig withCenter(JointSpec const &joint, ActuatorConfig actuator, std::string const &path) {
+    auto const &[scale, offset] = actuator.transmission;
+    auto const lower = (joint.limits.lower - offset) / scale;
+    auto const upper = (joint.limits.upper - offset) / scale;
+    if (std::abs(upper - lower) >= 2.0 * std::numbers::pi) {
+        fail(path, "joint '" + joint.name + "' limits span " + std::to_string(std::abs(upper - lower)) +
+                       " rad at the motor, a turn or more: its angle at power-on is ambiguous");
+    }
+    actuator.motorCenter = 0.5 * (lower + upper);
+    return actuator;
+}
+
 DriverConfig parse(RobotProfile const &profile) {
     auto const &node = profile.driver.node;
     auto const path = std::string{"driver"};
@@ -154,7 +168,7 @@ DriverConfig parse(RobotProfile const &profile) {
             fail(entryPath + ".id", "CAN ID is used twice or equals the host ID");
         }
         checkRanges(profile.joints[*joint], actuator, entryPath);
-        byJoint[*joint] = actuator;
+        byJoint[*joint] = withCenter(profile.joints[*joint], actuator, entryPath);
     }
     for (std::size_t joint = 0; joint < profile.dof(); ++joint) {
         if (not byJoint[joint]) {
@@ -166,6 +180,11 @@ DriverConfig parse(RobotProfile const &profile) {
 }
 
 } // namespace
+
+double turnCorrection(ActuatorConfig const &actuator, double const motor) noexcept {
+    constexpr auto turn = 2.0 * std::numbers::pi;
+    return turn * std::round((actuator.motorCenter - motor) / turn);
+}
 
 Expected<DriverConfig> parseDriverConfig(RobotProfile const &profile) {
     try {
