@@ -281,12 +281,14 @@ TEST_F(RobStrideDriverTest, DisablingReturnsToPositionPolling) {
     cycle(hal::DrivePower::Disabled, 3);
     for (std::size_t i = 0; i < profile.dof(); ++i) {
         EXPECT_FALSE(motors->enabled(i)) << i;
-        EXPECT_FALSE(state.actuators[i].enabled) << i;
     }
-    // Stopped motors stay quiet for 20 ms, five cycles.
+    // Stopped motors stay quiet for 20 ms, five cycles, and answer the stop after that.
     EXPECT_FALSE(state.isFresh);
     cycle(hal::DrivePower::Disabled, 5);
     EXPECT_TRUE(state.isFresh);
+    for (std::size_t i = 0; i < profile.dof(); ++i) {
+        EXPECT_FALSE(state.actuators[i].enabled) << i;
+    }
     auto const before = bus->sent.size();
     cycle(hal::DrivePower::Disabled, 2);
     EXPECT_EQ(sentOfType(FrameType::ReadParameter, before), 2 * profile.dof());

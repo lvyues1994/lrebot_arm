@@ -73,7 +73,7 @@ ACTUATORS = [
     ("joint4", "joint4", 14.0),
     ("joint5", "joint5", 14.0),
     ("joint6", "joint6", 14.0),
-    ("gripper", "joint_left", 20.0),
+    ("gripper", "joint_left", 40.0),
 ]
 
 VISUAL_COLORS = [

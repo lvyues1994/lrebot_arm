@@ -4,6 +4,7 @@
 #include <array>
 #include <mutex>
 #include <thread>
+#include <utility>
 
 namespace larm::drivers::robstride {
 namespace {
@@ -19,8 +20,9 @@ struct Motor {
     std::uint32_t faults{};
     std::int8_t runMode = kRunModeMotion;
     bool silent{};
-    // Batches of frames still left unanswered after a stop.
+    // Batches of frames still left unanswered after a stop; the answer to the stop comes after them.
     std::int64_t quietBatches{};
+    bool stopUnanswered{};
     MotionCommand command;
     double position{};
     double velocity{};
@@ -148,6 +150,9 @@ struct SimulatedMotorsImpl final : SimulatedMotors {
         }
         for (auto &motor : motors) {
             motor.quietBatches = std::max<std::int64_t>(motor.quietBatches - 1, 0);
+            if (motor.quietBatches == 0 and std::exchange(motor.stopUnanswered, false)) {
+                reply(motor);
+            }
         }
         for (auto const &frame : frames) {
             handle(frame);
@@ -206,17 +211,23 @@ struct SimulatedMotorsImpl final : SimulatedMotors {
                 motor.command = MotionCommand{.position = motor.position};
             }
             return reply(motor);
-        case FrameType::Disable:
-            if (motor.mode == MotorMode::Run) {
+        case FrameType::Disable: {
+            auto const stopped = motor.mode == MotorMode::Run and options.quietAfterStop > Duration{0};
+            if (stopped) {
                 // Counted down once before the next batch is handled.
                 motor.quietBatches = 1 + (options.quietAfterStop + options.step - Duration{1}) / options.step;
+                motor.stopUnanswered = true;
             }
             motor.mode = MotorMode::Reset;
             if (frame.data[0] == 1) {
                 motor.flags = 0;
                 motor.faults = 0;
             }
-            return reply(motor);
+            if (not stopped) {
+                reply(motor);
+            }
+            return;
+        }
         case FrameType::Motion:
             if (auto const command = decodeMotion(frame, motor.ranges);
                 command and motor.mode == MotorMode::Run) {

@@ -33,11 +33,12 @@ joints:
     gains: {stiffness: 50.0, damping: 4.0}
   # 夹爪以单指位移（米）表示，对应描述中的 joint_left。真机实测行程：闭合时电机约 -0.01 rad，张开到头
   # 约 5.81 rad（按 7.353 mm/rad 为 42.7 mm），上限留出约 0.1 rad。增益取 LeRobot reBot B601 夹爪的
-  # MIT 增益（电机侧 kp 8、kd 0.3），经 7.353 mm/rad 换算。
+  # MIT 增益（电机侧 kp 8、kd 0.3），经 7.353 mm/rad 换算。力上限：真机上 20 N 推不动夹爪（静摩擦约 20 N），
+  # 取 40 N（电机侧约 0.29 Nm）。
   - name: gripper
     description_joint: joint_left
     unit: meter
-    limits: {position: [0.0, 0.042], velocity: 0.05, acceleration: 0.5, jerk: 5.0, effort: 20.0}
+    limits: {position: [0.0, 0.042], velocity: 0.05, acceleration: 0.5, jerk: 5.0, effort: 40.0}
     gains: {stiffness: 150000.0, damping: 5500.0}
 
 groups:

@@ -309,6 +309,20 @@ TEST_F(ControlCycleTest, StaleFeedbackWhileDisabledOnlyKeepsTheArmFromEnabling) 
     EXPECT_EQ(snapshot().fault, FaultCode::FeedbackLost);
 }
 
+TEST_F(ControlCycleTest, ActuatorsFallingSilentAsTheyAreDisabledDoNotFault) {
+    enable();
+    auto const timeout = static_cast<int>(profile.safety.feedbackTimeoutCycles);
+    // The actuators still report themselves on while their feedback is stale.
+    backend->setFeedbackLost(true);
+    push(SetDrivePower{.power = DrivePower::Disabled});
+    run(5 * timeout);
+    EXPECT_EQ(snapshot().safety, SafetyState::Normal);
+    backend->setFeedbackLost(false);
+    run(2);
+    EXPECT_EQ(snapshot().power, DrivePower::Disabled);
+    EXPECT_EQ(snapshot().safety, SafetyState::Normal);
+}
+
 TEST_F(ControlCycleTest, ResetReArmsADroppedActuatorWhileTheOthersHold) {
     enable();
     run(10);

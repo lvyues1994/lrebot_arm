@@ -22,8 +22,9 @@ struct SimulatedMotorsOptions {
     std::vector<double> position;
     // Mechanical stops of each motor, {lower, upper} in motor units; none when empty.
     std::vector<std::array<double, 2>> stops;
-    // After answering a stop from run mode, a motor leaves frames unanswered for this long, as the
-    // RobStride firmware does; counted in batches of `step`.
+    // After a stop from run mode, a motor leaves frames unanswered for this long and answers the stop
+    // after it, as the RobStride firmware can do (it sometimes answers the stop first); counted in
+    // batches of `step`.
     Duration quietAfterStop = std::chrono::milliseconds{20};
 };
 

@@ -96,11 +96,12 @@ struct ControlCycleImpl final : ControlCycle {
         return ControlContext{.now = state.stamp, .period = period, .state = state, .model = cache};
     }
 
-    // Stale feedback is a fault while an actuator may be powered. Disabled, the arm rests on its stops
-    // and stale feedback only keeps it from being enabled; RobStride motors fall silent for about
-    // 20 ms after a stop.
+    // Stale feedback is a fault while power is requested. Once the motors are told to stop it changes
+    // nothing: they keep being told until they answer, and disabled, stale feedback only keeps the arm
+    // from being enabled. RobStride motors fall silent for 20-25 ms on a stop, sometimes before they
+    // answer it.
     void trackFeedback() noexcept {
-        if (state.isFresh or (phase == PowerPhase::Off and requestedPower == hal::DrivePower::Disabled)) {
+        if (state.isFresh or requestedPower == hal::DrivePower::Disabled) {
             staleCycles = 0;
             return;
         }

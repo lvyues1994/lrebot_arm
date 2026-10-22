@@ -509,6 +509,12 @@ struct Probe {
                                "; support the arm, then press the emergency stop"));
             code = kFailed;
         }
+        if (auto const latest = session.latest(); latest.safety != larm::control::SafetyState::Normal) {
+            emit(
+                JsonLine{"warning"}.field("message", "the runtime ends with a fault: " +
+                                                         std::string{larm::control::toString(latest.fault)}));
+            code = kFailed;
+        }
         report(running);
         return code;
     }
