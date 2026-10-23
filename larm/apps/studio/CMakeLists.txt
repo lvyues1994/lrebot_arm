@@ -13,4 +13,14 @@ if(LARM_BUILD_TESTS)
     set_tests_properties(larm_studio_script PROPERTIES
         ENVIRONMENT "ROS_DOMAIN_ID=229;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST"
         TIMEOUT 300)
+    if(LARM_WITH_ROBSTRIDE)
+        # The same flow through the RobStride driver and simulated motors, as it runs on the arm.
+        add_test(NAME larm_studio_script_robstride
+            COMMAND /usr/bin/python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/studio_script_test.py
+                    --runtime $<TARGET_FILE:larm_runtime_node> --studio $<TARGET_FILE:larm_studio>
+                    --profile ${LARM_ROBOT_PROFILE} --backend robstride_simulated)
+        set_tests_properties(larm_studio_script_robstride PROPERTIES
+            ENVIRONMENT "ROS_DOMAIN_ID=228;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST"
+            TIMEOUT 300)
+    endif()
 endif()

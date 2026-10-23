@@ -120,8 +120,12 @@ python3 robots/rebot_b601/scripts/fit_gravity.py cal.jsonl --validation val.json
 仿真加 Studio，关闭 Studio 即结束整个 launch：
 
 ```bash
-ros2 launch rebot_b601 studio.launch.py       # rviz:=true 同时开 RViz
+ros2 launch rebot_b601 studio.launch.py                          # MuJoCo 仿真；rviz:=true 同时开 RViz
+ros2 launch rebot_b601 studio.launch.py backend:=robstride       # 真机（先启动 can0，见上文）
+ros2 launch rebot_b601 studio.launch.py backend:=robstride_simulated   # 同一驱动接模拟电机
 ```
+
+接真机时：各面板的速度初值为 0.2，按需自己调整；视口显示的是实测关节位置。会话面板的 Ready 与 Park 按面板的速度移动手臂（夹爪不动）。"Gravity mode" 打开重力模式：手臂零刚度、补偿重力，可以用手推动，视口跟着动；接近关节限位时有虚拟弹簧往回推；再按一次（或 Stop）关闭，手臂停在原处保持。重力模式运行时会话面板的其他操作不会执行，停放、失能前先关掉它；关节、笛卡尔等面板的运动会抢占它。
 
 也可以连接一个已经在运行的运行时节点：
 
@@ -129,6 +133,6 @@ ros2 launch rebot_b601 studio.launch.py       # rviz:=true 同时开 RViz
 ros2 run larm larm_studio --profile $(ros2 pkg prefix rebot_b601)/share/rebot_b601/config/rebot_b601_rs.yaml
 ```
 
-右侧是会话面板（使能、停放、失能、复位、急停）和关节、笛卡尔、路径、夹爪面板；每个面板的"Stop"停止它正在执行的操作。视口左键旋转、右键平移、滚轮缩放，黄色标记是笛卡尔面板的目标位姿。
+右侧是会话面板（使能、停放、失能、复位、急停、重力模式）和关节、笛卡尔、路径、夹爪面板；每个面板的"Stop"停止它正在执行的操作。视口左键旋转、右键平移、滚轮缩放，黄色标记是笛卡尔面板的目标位姿。
 
 `--script [--screenshots DIR]` 用真实按钮自动走完主要流程并检查结果（`colcon test` 中的 `larm_studio_script` 默认在 `offscreen` 平台下运行它；设 `QT_QPA_PLATFORM=xcb` 可得到渲染后的截图）。

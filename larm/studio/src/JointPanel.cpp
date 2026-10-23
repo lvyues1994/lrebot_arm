@@ -30,7 +30,7 @@ JointPanel::JointPanel(StudioContext const &context_, JointGroupSpec group_, QWi
         measured.push_back(value);
     }
     speed = makeSpin(0.05, 1.0, 0.05, 2);
-    speed->setValue(0.5);
+    speed->setValue(0.2);
     copy = new QPushButton{QStringLiteral("Copy current")};
     move = new QPushButton{QStringLiteral("Move")};
     stop = new QPushButton{QStringLiteral("Stop")};

@@ -43,7 +43,7 @@ CartesianPanel::CartesianPanel(StudioContext const &context_, JointGroupSpec gro
     turn = makeSpin(1.0, 90.0, 5.0, 1, QStringLiteral(" °"));
     turn->setValue(10.0);
     speed = makeSpin(0.05, 1.0, 0.05, 2);
-    speed->setValue(0.5);
+    speed->setValue(0.2);
     auto const axes =
         std::array<QString, 6>{QStringLiteral("x"),  QStringLiteral("y"),  QStringLiteral("z"),
                                QStringLiteral("Rx"), QStringLiteral("Ry"), QStringLiteral("Rz")};

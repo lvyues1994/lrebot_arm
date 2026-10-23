@@ -35,7 +35,8 @@ Script::Script(MainWindow &window_, runtime::RobotSession &session_, Journal &jo
     auto *const cartesian = window.cartesianPanel();
     auto *const gripper = window.gripperPanel();
     auto *const path = window.pathPanel();
-    if (joints == nullptr or gripper == nullptr or sessionPanel->readyButton() == nullptr) {
+    if (joints == nullptr or gripper == nullptr or sessionPanel->readyButton() == nullptr or
+        sessionPanel->gravityButton() == nullptr) {
         journal.write(
             QStringLiteral("script: the profile needs an arm group, a gripper group and a ready pose"));
         failed = true;
@@ -47,8 +48,16 @@ Script::Script(MainWindow &window_, runtime::RobotSession &session_, Journal &jo
                      [sessionPanel] { sessionPanel->enableButton()->click(); }});
     steps.push_back({QStringLiteral("go to the ready pose"), after(QStringLiteral("enable: succeeded")),
                      [sessionPanel] { sessionPanel->readyButton()->click(); }});
+    steps.push_back({QStringLiteral("turn gravity mode on"), after(QStringLiteral("ready: succeeded")),
+                     [sessionPanel] { sessionPanel->gravityButton()->click(); }});
+    steps.push_back({QStringLiteral("turn gravity mode off"),
+                     [this](QStringList const &lines) {
+                         return seen(lines, QStringLiteral("gravity mode: started")) and
+                                sinceAct.elapsed() > 1000;
+                     },
+                     [sessionPanel] { sessionPanel->gravityButton()->click(); }});
     steps.push_back(
-        {QStringLiteral("move to joint targets"), after(QStringLiteral("ready: succeeded")), [joints] {
+        {QStringLiteral("move to joint targets"), after(QStringLiteral("gravity mode: stopped")), [joints] {
              joints->setTargets(armPose(0.6));
              joints->setSpeed(0.6);
              joints->moveButton()->click();

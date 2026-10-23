@@ -20,12 +20,14 @@ def main() -> int:
     parser.add_argument("--studio", required=True)
     parser.add_argument("--profile", required=True)
     parser.add_argument("--screenshots")
+    parser.add_argument("--backend", default="mujoco", help="mujoco (twice real time) or robstride_simulated")
     args = parser.parse_args()
 
     studio_env = dict(os.environ)
     studio_env.setdefault("QT_QPA_PLATFORM", "offscreen")
+    backend = ["-p", "real_time_factor:=2.0"] if args.backend == "mujoco" else ["-p", f"backend:={args.backend}"]
     runtime = subprocess.Popen(
-        [args.runtime, "--ros-args", "-p", f"profile:={args.profile}", "-p", "real_time_factor:=2.0"],
+        [args.runtime, "--ros-args", "-p", f"profile:={args.profile}", *backend],
         start_new_session=True,
     )
     studio_code = None
