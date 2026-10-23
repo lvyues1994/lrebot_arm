@@ -101,7 +101,7 @@ larm_driver_probe --profile $P --joints gripper grip 0.005 --effort 60 --confirm
 
 ### 重力标定
 
-只在无接触的姿态测量（停放姿态手腕压在大臂上，测得的力矩不能用），每个姿态从两侧逼近以消去摩擦，按连杆拟合质量与质心，结果写入配置的 `dynamics.links`：
+只在无接触的姿态测量（停放姿态手腕压在大臂上，测得的力矩不能用），以 0.04 rad/s 上下扫过每个姿态，两向平均消去摩擦（停在姿态上测保持力矩消不掉静摩擦），按连杆拟合质量与质心，结果写入配置的 `dynamics.links`（当前值为 2026-10-23 的标定结果）：
 
 ```bash
 source /opt/ros/jazzy/setup.bash
