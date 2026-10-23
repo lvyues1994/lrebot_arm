@@ -9,6 +9,9 @@
 //   jog JOINT RADIANS [--speed FRACTION] --confirm-motion
 //                                 enable, move one arm joint by at most 0.2 rad and back slowly, disable;
 //                                 FRACTION of the joint limits is at most 0.2, the default
+//   pose NAME SECONDS [--speed FRACTION] --confirm-motion
+//                                 enable, move the arm from rest to the profile pose NAME, hold it, move
+//                                 back, disable
 //   grip METERS [--effort NEWTONS] --confirm-motion
 //                                 enable, open (positive) or close the gripper by at most 0.01 m and
 //                                 back, disable; the effort limit is at most the profile's, the default
@@ -618,6 +621,46 @@ struct Probe {
         return finish(*running, ok ? kOk : kFailed);
     }
 
+    // Moves the arm from rest to the profile pose `name`, holds it for `seconds`, and moves back.
+    int pose(std::string const &name, double const seconds) {
+        if (not options.confirmMotion) {
+            return fail("pose moves the arm; add --confirm-motion", kUsage);
+        }
+        auto const group = profile.findGroup("arm");
+        auto const found = profile.poses.find(name);
+        if (not group or found == profile.poses.end()) {
+            return fail("the profile has no arm group or no pose '" + name + "'", kUsage);
+        }
+        auto const &members = profile.groups[*group].joints;
+        auto target = JointVector{static_cast<Eigen::Index>(members.size())};
+        auto rest = target;
+        for (std::size_t i = 0; i < members.size(); ++i) {
+            target[larm::idx(i)] = found->second[larm::idx(members[i])];
+            rest[larm::idx(i)] = profile.safety.restPose[larm::idx(members[i])];
+        }
+
+        auto running = startRuntime();
+        if (not running) {
+            return fail(running.error().message);
+        }
+        if (auto const refused = checkStart(*running->session); refused != kOk) {
+            return refused;
+        }
+        auto const sampling = sampler(*running->session);
+        auto *const arm = running->session->motion("arm");
+        auto ok =
+            succeeded(running->session->enable(), "enable") and
+            succeeded(arm->moveToJoints({.position = target, .speed = options.speed}), "move to " + name);
+        if (ok) {
+            auto const until = std::chrono::steady_clock::now() + larm::fromSeconds(seconds);
+            while (std::chrono::steady_clock::now() < until and not stop->stop_requested()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{50});
+            }
+            ok = succeeded(arm->moveToJoints({.position = rest, .speed = options.speed}), "move back");
+        }
+        return finish(*running, ok ? kOk : kFailed);
+    }
+
     // Opens (positive) or closes the gripper by `step` from where it is, and back.
     int grip(double const step) {
         if (not options.confirmMotion) {
@@ -690,6 +733,7 @@ void usage() {
            "                         [--rt-priority N] COMMAND\n"
            "  scan\n  monitor SECONDS\n  hold SECONDS --confirm-power\n"
            "  jog JOINT RADIANS [--speed FRACTION<=0.2] --confirm-motion\n"
+           "  pose NAME SECONDS [--speed FRACTION<=0.2] --confirm-motion\n"
            "  grip METERS [--effort NEWTONS] --confirm-motion\n";
 }
 
@@ -750,6 +794,9 @@ int main(int argc, char **argv) {
         }
         if (options->command == "jog" and arguments.size() == 2) {
             return probe.jog(arguments[0], std::stod(arguments[1]));
+        }
+        if (options->command == "pose" and arguments.size() == 2) {
+            return probe.pose(arguments[0], std::stod(arguments[1]));
         }
         if (options->command == "grip" and arguments.size() == 1) {
             return probe.grip(std::stod(arguments[0]));
