@@ -155,6 +155,20 @@ TEST_F(RemoteSessionTest, StopRequestCancelsTheGoal) {
     EXPECT_FALSE(result);
 }
 
+TEST_F(RemoteSessionTest, GravityModeRunsUntilStopped) {
+    auto source = lexec::inplace_stop_source{};
+    auto canceller = std::jthread{[&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds{400});
+        EXPECT_EQ(remote().latest().activeCount, 1u);
+        source.request_stop();
+    }};
+    auto const result = lexec::sync_wait(lexec::write_env(
+        remote().motion("arm")->freedrive(), lexec::prop{lexec::get_stop_token, source.get_token()}));
+    EXPECT_FALSE(result);
+    EXPECT_TRUE(
+        lexec::sync_wait(remote().motion("arm")->moveToJoints({.position = armTarget(0.2), .speed = 0.5})));
+}
+
 TEST_F(RemoteSessionTest, ReportsFailuresWithTheirReason) {
     EXPECT_EQ(expectMotionError(remote().disable({})).reason, MotionFailure::InvalidGoal);
     auto beyond = armTarget(0.0);

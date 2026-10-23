@@ -1,4 +1,5 @@
 #include <larm/control/ControlCycle.h>
+#include <larm/control/GravityCompController.h>
 #include <larm/control/GripperController.h>
 #include <larm/control/JointTrajectoryController.h>
 #include <larm/hal/IdealBackend.h>
@@ -483,6 +484,76 @@ TEST_F(ControlCycleTest, GripperStallsWhenItCannotReachTheTarget) {
     ASSERT_TRUE(finished(GoalId{14}));
     EXPECT_EQ(finished(GoalId{14})->status, ControlStatus::Succeeded);
     EXPECT_NEAR(snapshot().state.joints.position[6], 0.0, 1e-9);
+}
+
+TEST_F(ControlCycleTest, GravityModeWallsBeginInsideTheLimitsButNotPastRest) {
+    auto const config = profileGravityComp(profile, arm);
+    EXPECT_NEAR(config.wallLower[0], profile.joints[0].limits.lower + 0.1, 1e-12);
+    EXPECT_NEAR(config.wallUpper[0], profile.joints[0].limits.upper - 0.1, 1e-12);
+    // joint2 rests on its lower limit.
+    EXPECT_NEAR(config.wallLower[1], profile.joints[1].limits.lower, 1e-12);
+    EXPECT_NEAR(config.wallUpper[1], profile.joints[1].limits.upper - 0.1, 1e-12);
+    EXPECT_NEAR(config.damping[1], 0.2 * profile.joints[1].gains.damping, 1e-12);
+}
+
+TEST_F(ControlCycleTest, GravityModeFreesTheJointsExceptInTheWalls) {
+    auto controller = makeGravityCompController(profileGravityComp(profile, arm));
+    auto state = RobotState::zero(profile.dof());
+    state.joints.position = clearancePose();
+    state.joints.position[0] = profile.joints[0].limits.upper - 0.05;
+    auto const cache =
+        ModelCache{.kinematics = nullptr, .gravity = JointVector::Constant(idx(profile.dof()), 1.5)};
+    auto const context =
+        ControlContext{.now = {}, .period = profile.controlPeriod, .state = state, .model = cache};
+    auto out = JointCommand::zero(profile.dof());
+    ASSERT_EQ(controller->start(context).status, ControlStatus::Running);
+
+    EXPECT_EQ(controller->update(context, out).status, ControlStatus::Running);
+    EXPECT_DOUBLE_EQ(out.stiffness[1], 0.0);
+    EXPECT_DOUBLE_EQ(out.position[1], state.joints.position[1]);
+    EXPECT_DOUBLE_EQ(out.effort[1], 1.5);
+    EXPECT_DOUBLE_EQ(out.damping[1], 0.2 * profile.joints[1].gains.damping);
+    // joint1 is in its upper wall and pulled back to where the wall begins.
+    EXPECT_DOUBLE_EQ(out.position[0], profile.joints[0].limits.upper - 0.1);
+    EXPECT_DOUBLE_EQ(out.stiffness[0], profile.joints[0].gains.stiffness);
+    // The gripper is not claimed.
+    EXPECT_DOUBLE_EQ(out.effort[6], 0.0);
+
+    state.joints.velocity[3] = 1.1 * profile.joints[3].limits.velocity;
+    auto const flung = controller->update(context, out);
+    EXPECT_EQ(flung.status, ControlStatus::Failed);
+    EXPECT_EQ(flung.fault, FaultCode::TrackingError);
+
+    state.joints.velocity[3] = 0.0;
+    controller->requestStop();
+    EXPECT_EQ(controller->update(context, out).status, ControlStatus::Stopped);
+    EXPECT_DOUBLE_EQ(out.position[0], state.joints.position[0]);
+    EXPECT_DOUBLE_EQ(out.stiffness[0], 0.0);
+}
+
+TEST_F(ControlCycleTest, GravityModeReleasesTheArmAndHoldsWhereItIsStopped) {
+    enable();
+    auto const holding = backend->lastCommand();
+    push(ActivateController{.goal = GoalId{31},
+                            .controller = makeGravityCompController(profileGravityComp(profile, arm))});
+    run(3);
+    auto const free = backend->lastCommand();
+    for (std::size_t i = 0; i < 6; ++i) {
+        EXPECT_DOUBLE_EQ(free.stiffness[idx(i)], 0.0) << i;
+        EXPECT_NEAR(free.effort[idx(i)], holding.effort[idx(i)], 1e-9) << i;
+    }
+    EXPECT_DOUBLE_EQ(free.stiffness[6], holding.stiffness[6]);
+    EXPECT_FALSE(finished(GoalId{31}));
+
+    push(CancelGoal{.goal = GoalId{31}});
+    run(2);
+    ASSERT_TRUE(finished(GoalId{31}));
+    EXPECT_EQ(finished(GoalId{31})->status, ControlStatus::Stopped);
+    auto const &held = backend->lastCommand();
+    for (std::size_t i = 0; i < 6; ++i) {
+        EXPECT_DOUBLE_EQ(held.stiffness[idx(i)], profile.joints[i].gains.stiffness) << i;
+        EXPECT_NEAR(held.position[idx(i)], snapshot().state.joints.position[idx(i)], 1e-12) << i;
+    }
 }
 
 TEST_F(ControlCycleTest, DisablingStopsGoalsAndReportsPowerOff) {

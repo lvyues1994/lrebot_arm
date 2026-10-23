@@ -4,6 +4,7 @@
 
 #include <control_msgs/action/follow_joint_trajectory.hpp>
 #include <control_msgs/action/gripper_command.hpp>
+#include <larm_msgs/action/freedrive.hpp>
 #include <larm_msgs/action/move_to_joints.hpp>
 #include <larm_msgs/action/move_to_pose.hpp>
 #include <larm_msgs/msg/arm_status.hpp>
@@ -23,6 +24,7 @@ namespace {
 using FollowJointTrajectory = control_msgs::action::FollowJointTrajectory;
 using GripperCommand = control_msgs::action::GripperCommand;
 using MoveToJoints = larm_msgs::action::MoveToJoints;
+using Freedrive = larm_msgs::action::Freedrive;
 using MoveToPose = larm_msgs::action::MoveToPose;
 using ArmStatus = larm_msgs::msg::ArmStatus;
 using Trigger = std_srvs::srv::Trigger;
@@ -66,6 +68,7 @@ struct RemoteMotion final : runtime::MotionApi {
     runtime::Async<runtime::MotionResult> moveToJoints(runtime::JointGoal goal) override;
     runtime::Async<runtime::MotionResult> moveToPose(runtime::PoseGoal goal) override;
     runtime::Async<runtime::MotionResult> followPath(runtime::JointPath path) override;
+    runtime::Async<runtime::MotionResult> freedrive() override;
 
   private:
     RemoteSessionImpl *session;
@@ -75,6 +78,7 @@ struct RemoteMotion final : runtime::MotionApi {
     ActionClient<MoveToJoints> moveJoints;
     ActionClient<MoveToPose> movePose;
     ActionClient<FollowJointTrajectory> follow;
+    ActionClient<Freedrive> free;
 };
 
 struct RemoteGripper final : runtime::GripperApi {
@@ -292,8 +296,15 @@ RemoteMotion::RemoteMotion(RemoteSessionImpl *const session_, GroupJoints joints
     : session{session_}, joints{std::move(joints_)}, baseFrame{spec.baseFrame}, toolFrame{spec.toolFrame},
       moveJoints{rclcpp_action::create_client<MoveToJoints>(&node, prefix + "/move_to_joints")},
       movePose{rclcpp_action::create_client<MoveToPose>(&node, prefix + "/move_to_pose")},
-      follow{
-          rclcpp_action::create_client<FollowJointTrajectory>(&node, prefix + "/follow_joint_trajectory")} {}
+      follow{rclcpp_action::create_client<FollowJointTrajectory>(&node, prefix + "/follow_joint_trajectory")},
+      free{rclcpp_action::create_client<Freedrive>(&node, prefix + "/freedrive")} {}
+
+runtime::Async<runtime::MotionResult> RemoteMotion::freedrive() {
+    return session->act<runtime::MotionResult>(
+        free, Freedrive::Goal{}, [](Freedrive::Result::SharedPtr const &result) {
+            return runtime::MotionResult{.position = toJointVector(result->positions)};
+        });
+}
 
 runtime::Async<runtime::MotionResult> RemoteMotion::moveToJoints(runtime::JointGoal goal) {
     auto message = MoveToJoints::Goal{};

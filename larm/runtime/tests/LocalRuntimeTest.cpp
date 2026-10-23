@@ -271,6 +271,34 @@ TEST_F(LocalRuntimeTest, NewGoalPreemptsTheRunningOne) {
     EXPECT_LT((motion.position - armTarget(0.2)).cwiseAbs().maxCoeff(), 0.02);
 }
 
+TEST_F(LocalRuntimeTest, GravityModeRunsUntilStoppedAndThenHolds) {
+    ASSERT_TRUE(run(arm->moveToJoints({.position = armTarget(0.0), .speed = 0.5})));
+    auto const start = session->latest().state.joints.position;
+    auto source = lexec::inplace_stop_source{};
+    auto canceller = std::jthread{[&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds{300});
+        source.request_stop();
+    }};
+    auto const result =
+        run(lexec::write_env(arm->freedrive(), lexec::prop{lexec::get_stop_token, source.get_token()}));
+    EXPECT_FALSE(result);
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    auto const snapshot = session->latest();
+    EXPECT_EQ(snapshot.activeCount, 0u);
+    EXPECT_EQ(snapshot.safety, control::SafetyState::Normal);
+    // The MJCF keeps the CAD inertia; its joint friction holds the arm against the difference.
+    EXPECT_LT((snapshot.state.joints.position - start).head(6).cwiseAbs().maxCoeff(), 0.05);
+    EXPECT_TRUE(run(arm->moveToJoints({.position = armTarget(0.3), .speed = 0.5})));
+}
+
+TEST_F(LocalRuntimeTest, AMotionPreemptsGravityMode) {
+    auto freeing = std::async(std::launch::async, [&] { return run(arm->freedrive()); });
+    std::this_thread::sleep_for(std::chrono::milliseconds{200});
+    EXPECT_EQ(session->latest().activeCount, 1u);
+    EXPECT_TRUE(run(arm->moveToJoints({.position = armTarget(0.2), .speed = 0.5})));
+    EXPECT_FALSE(freeing.get());
+}
+
 TEST_F(LocalRuntimeTest, GripperAndArmMoveIndependently) {
     auto gripping =
         std::async(std::launch::async, [&] { return run(hand->grip({.position = 0.0, .maxEffort = 5.0})); });

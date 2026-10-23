@@ -5,6 +5,7 @@
 #include <co2/co2.hpp>
 #include <control_msgs/action/follow_joint_trajectory.hpp>
 #include <control_msgs/action/gripper_command.hpp>
+#include <larm_msgs/action/freedrive.hpp>
 #include <larm_msgs/action/move_to_joints.hpp>
 #include <larm_msgs/action/move_to_pose.hpp>
 #include <larm_msgs/msg/arm_status.hpp>
@@ -25,6 +26,7 @@ namespace {
 using FollowJointTrajectory = control_msgs::action::FollowJointTrajectory;
 using GripperCommand = control_msgs::action::GripperCommand;
 using MoveToJoints = larm_msgs::action::MoveToJoints;
+using Freedrive = larm_msgs::action::Freedrive;
 using MoveToPose = larm_msgs::action::MoveToPose;
 using ArmStatus = larm_msgs::msg::ArmStatus;
 using Trigger = std_srvs::srv::Trigger;
@@ -77,6 +79,7 @@ struct RuntimeNodeImpl final : RuntimeNode {
             auto const joints = GroupJoints::of(profile, group);
             if (auto *const motion = session.motion(group.name)) {
                 serveMotion(group, joints, motion);
+                serveFreedrive(group, motion);
             }
             if (auto *const gripper = session.gripper(group.name)) {
                 serveGripper(group, profile.joints[group.joints.front()].limits.effort, gripper);
@@ -262,6 +265,17 @@ struct RuntimeNodeImpl final : RuntimeNode {
                                     result->positions = toStd(reached.position);
                                     return result;
                                 }));
+        });
+    }
+
+    void serveFreedrive(JointGroupSpec const &group, runtime::MotionApi *motion) {
+        serve<Freedrive>(group.name + "/freedrive", [this, motion](GoalHandle<Freedrive> const &) {
+            return recorded("freedrive",
+                            motion->freedrive() | lexec::then([](runtime::MotionResult const &held) {
+                                auto result = std::make_shared<Freedrive::Result>();
+                                result->positions = toStd(held.position);
+                                return result;
+                            }));
         });
     }
 

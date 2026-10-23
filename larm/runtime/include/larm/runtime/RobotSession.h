@@ -110,6 +110,10 @@ struct MotionApi {
     virtual Async<MotionResult> moveToJoints(JointGoal goal) = 0;
     virtual Async<MotionResult> moveToPose(PoseGoal goal) = 0;
     virtual Async<MotionResult> followPath(JointPath path) = 0;
+    // Gravity mode: the group's joints may be moved by hand (no stiffness, gravity compensated, walls
+    // near the limits) until a stop request or a new goal; they then hold where they are, and the motion
+    // completes with set_stopped.
+    virtual Async<MotionResult> freedrive() = 0;
 };
 
 struct GripperApi {

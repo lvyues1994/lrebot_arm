@@ -21,7 +21,7 @@ struct RuntimeNodeOptions {
 // Serves a RobotSession on `node`:
 //   /joint_states, ~/status, and /clock when requested;
 //   per group with a tool frame: ~/<group>/follow_joint_trajectory, ~/<group>/move_to_joints,
-//   ~/<group>/move_to_pose; per single-joint group: ~/<group>/gripper_command;
+//   ~/<group>/move_to_pose, ~/<group>/freedrive; per single-joint group: ~/<group>/gripper_command;
 //   services ~/enable, ~/disable, ~/park, ~/reset_fault, ~/emergency_stop.
 // All work runs in `scope`. Call close() when shutting down, then drain the scope with
 // lrclexec::spin_with_scope before destroying this object, the node or the session.

@@ -2,6 +2,7 @@
 #include "Operations.h"
 
 #include <larm/control/ControlCycle.h>
+#include <larm/control/GravityCompController.h>
 #include <larm/control/GripperController.h>
 #include <larm/control/JointTrajectoryController.h>
 #include <larm/model/RobotModel.h>
@@ -235,6 +236,7 @@ struct GroupMotion final : MotionApi {
     Async<MotionResult> moveToJoints(JointGoal goal) override;
     Async<MotionResult> moveToPose(PoseGoal goal) override;
     Async<MotionResult> followPath(JointPath path) override;
+    Async<MotionResult> freedrive() override;
 
   private:
     LocalRuntime *runtime;
@@ -504,6 +506,21 @@ Async<MotionResult> GroupMotion::followPath(JointPath path) {
         };
         return detail::GoalPlan<MotionResult>{
             .request = {.joints = joints, .makeController = std::move(factory)},
+            .result = [spec](control::RobotSnapshot const &snapshot) {
+                return MotionResult{.position = groupValues(spec, snapshot.state.joints.position)};
+            }};
+    });
+}
+
+Async<MotionResult> GroupMotion::freedrive() {
+    return runtime->planned<MotionResult>([runtime = runtime, group = group] {
+        auto const &spec = runtime->robot.groups[group];
+        auto const config = control::profileGravityComp(runtime->robot, maskOf(spec));
+        return detail::GoalPlan<MotionResult>{
+            .request = {.joints = maskOf(spec),
+                        .makeController = [config](control::RobotSnapshot const &) -> FactoryResult {
+                            return control::makeGravityCompController(config);
+                        }},
             .result = [spec](control::RobotSnapshot const &snapshot) {
                 return MotionResult{.position = groupValues(spec, snapshot.state.joints.position)};
             }};

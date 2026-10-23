@@ -1,0 +1,7 @@
+# Gravity mode of one group: its joints may be moved by hand, gravity compensated and without stiffness
+# except near their limits, until the goal is canceled or another goal takes the group; they then hold
+# where they are.
+---
+# Measured positions when gravity mode ended, in the group's joint order.
+float64[] positions
+---
