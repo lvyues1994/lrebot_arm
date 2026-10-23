@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Fits the links' masses and centers of mass of the reBot B601-RS arm to a gravity calibration.
 
-Reads the `calibration` lines that `larm_driver_probe calibrate` writes. Each pose was approached
-from below and from above every joint; the mean of the two holding torques cancels Coulomb
+Reads the `calibration` lines that `larm_driver_probe calibrate` writes. Each pose was swept
+through slowly from below and from above every joint; the mean of the two torques cancels Coulomb
 friction, half their difference estimates it. Gravity is linear in each link's mass m and first
 moment m*c, tau = Y(q) phi. The fit is the most probable phi given the data and the CAD values as a
 prior (Gaussian, 20 % on masses, 1 cm on centers of mass), so the directions the poses do not
@@ -111,7 +111,7 @@ def load(files, gravity):
             event = json.loads(line)
             if event.get("event") == "calibration":
                 sides[(file, event["set"], event["index"])][event["side"]] = event
-    poses, friction, still = [], [], []
+    poses, friction, fewest = [], [], []
     for key, pair in sorted(sides.items()):
         if set(pair) != {-1, 1}:
             continue
@@ -119,8 +119,8 @@ def load(files, gravity):
         y = 0.5 * (gravity.regressor(low["position"]) + gravity.regressor(high["position"]))
         poses.append((y, 0.5 * (np.array(low["torque"]) + np.array(high["torque"]))))
         friction.append(0.5 * (np.array(low["torque"]) - np.array(high["torque"])))
-        still.append(max(low["max_speed"], high["max_speed"]))
-    return poses, np.array(friction), max(still, default=0.0)
+        fewest.append(min(low["samples"], high["samples"]))
+    return poses, np.array(friction), min(fewest, default=0)
 
 
 def link_parameters(gravity, phi):
@@ -208,10 +208,9 @@ def main():
         return
     if not arguments.data:
         parser.error("give the calibration data, or --synthetic")
-    poses, friction, still = load(arguments.data, gravity)
+    poses, friction, fewest = load(arguments.data, gravity)
     validation, _, _ = load(arguments.validation, gravity)
-    print(f"{len(poses)} calibration poses, {len(validation)} validation poses; fastest joint while recording "
-          f"{still:.4f} rad/s")
+    print(f"{len(poses)} calibration poses, {len(validation)} validation poses; fewest samples in a pass {fewest}")
     phi = fit(gravity, poses)
     report(gravity, poses, validation, friction, phi)
     section = profile_section(link_parameters(gravity, phi))

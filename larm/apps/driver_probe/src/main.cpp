@@ -13,9 +13,9 @@
 //                                 enable, move the arm from rest to the profile pose NAME, hold it, move
 //                                 back, disable
 //   calibrate FILE [SET] [--speed FRACTION] --confirm-motion
-//                                 enable, visit the poses SET (default "poses") of a gravity calibration
-//                                 file, approaching each from both sides, and record the holding torque;
-//                                 move back, disable
+//                                 enable, sweep slowly up and down through each pose SET (default
+//                                 "poses") of a gravity calibration file and record the torque at the
+//                                 pose each way; move back, disable
 //   grip METERS [--effort NEWTONS] --confirm-motion
 //                                 enable, open (positive) or close the gripper by at most 0.01 m and
 //                                 back, disable; the effort limit is at most the profile's, the default
@@ -53,9 +53,8 @@ constexpr double kJogSpeed = 0.2;
 constexpr auto kSamplePeriod = std::chrono::milliseconds{20};
 // How long the disabled arm is still sampled before the statistics are taken.
 constexpr auto kObserveDisabled = std::chrono::milliseconds{500};
-// A calibration pose is recorded for kRecord after the arm has been still there for kSettle.
-constexpr auto kSettle = std::chrono::milliseconds{1000};
-constexpr auto kRecord = std::chrono::milliseconds{1000};
+// Calibration sweeps run at this fraction of the joint limits (0.04 rad/s on joint2 and joint3).
+constexpr double kSweepSpeed = 0.02;
 
 enum ExitCode : int { kOk = 0, kFailed = 1, kUsage = 2, kRefused = 3 };
 
@@ -745,63 +744,88 @@ struct Probe {
         }
     }
 
-    // Means and spreads over a still interval, per arm joint.
+    // Means and spreads, per arm joint, of the samples taken while the arm passed within half the approach
+    // of a pose.
     struct Measurement {
         std::vector<double> position;
-        // The static impedance torque commanded: effort + stiffness (q_cmd - q). At rest the damping term
-        // averages to zero and only adds the motors' velocity noise (about 0.07 rad/s).
+        std::vector<double> velocity;
+        // The static impedance torque commanded: effort + stiffness (q_cmd - q). The damping term averages to
+        // zero at a steady speed and only adds the motors' velocity noise (about 0.07 rad/s).
         std::vector<double> torque;
         std::vector<double> torqueSpread;
         // What the motors report.
         std::vector<double> effort;
         std::vector<double> effortSpread;
-        double maxSpeed{};
         int samples{};
     };
 
-    Measurement measure(larm::runtime::RobotSession &session, larm::Duration const duration) const {
+    // Runs a motion while sampling the arm, keeping the samples within half the approach of `pose`.
+    template <class Sender>
+    std::optional<Measurement> sweep(larm::runtime::RobotSession &session, Sender &&motion,
+                                     JointVector const &pose, JointVector const &approach) const {
         auto const joints = armJoints();
         auto const n = joints.size();
-        auto sums = std::vector<double>(4 * n);
-        auto squares = std::vector<double>(4 * n);
-        auto result = Measurement{};
-        auto const until = std::chrono::steady_clock::now() + duration;
-        for (auto tick = std::chrono::steady_clock::now(); tick < until and not stop->stop_requested();
-             tick += kSamplePeriod) {
-            std::this_thread::sleep_until(tick);
-            auto const snapshot = session.latest();
-            auto const &state = snapshot.state.joints;
-            auto const &command = snapshot.command;
-            for (std::size_t i = 0; i < n; ++i) {
-                auto const j = larm::idx(joints[i]);
-                auto const torque =
-                    command.effort[j] + command.stiffness[j] * (command.position[j] - state.position[j]);
-                for (auto const &[k, value] : {std::pair{0U, state.position[j]}, std::pair{1U, torque},
-                                               std::pair{2U, state.effort[j]}}) {
-                    sums[k * n + i] += value;
-                    squares[k * n + i] += value * value;
+        constexpr unsigned kQuantities = 4;
+        auto sums = std::vector<double>(kQuantities * n);
+        auto squares = std::vector<double>(kQuantities * n);
+        auto samples = 0;
+        auto recorder = std::jthread{[&](std::stop_token const token) {
+            for (auto tick = std::chrono::steady_clock::now(); not token.stop_requested();
+                 tick += kSamplePeriod) {
+                std::this_thread::sleep_until(tick);
+                auto const snapshot = session.latest();
+                auto const &state = snapshot.state.joints;
+                auto const &command = snapshot.command;
+                auto inside = true;
+                for (std::size_t i = 0; i < n; ++i) {
+                    // Joints with no approach are not swept.
+                    inside = inside and (approach[larm::idx(i)] <= 0.0 or
+                                         std::abs(state.position[larm::idx(joints[i])] -
+                                                  pose[larm::idx(i)]) <= 0.5 * approach[larm::idx(i)]);
                 }
-                result.maxSpeed = std::max(result.maxSpeed, std::abs(state.velocity[j]));
+                if (not inside) {
+                    continue;
+                }
+                for (std::size_t i = 0; i < n; ++i) {
+                    auto const j = larm::idx(joints[i]);
+                    auto const torque =
+                        command.effort[j] + command.stiffness[j] * (command.position[j] - state.position[j]);
+                    for (auto const &[k, value] :
+                         {std::pair{0U, state.position[j]}, std::pair{1U, state.velocity[j]},
+                          std::pair{2U, torque}, std::pair{3U, state.effort[j]}}) {
+                        sums[k * n + i] += value;
+                        squares[k * n + i] += value * value;
+                    }
+                }
+                ++samples;
             }
-            ++result.samples;
+        }};
+        auto const moved = succeeded(std::forward<Sender>(motion), "sweep");
+        recorder.request_stop();
+        recorder.join();
+        if (not moved) {
+            return std::nullopt;
         }
-        auto const count = static_cast<double>(std::max(result.samples, 1));
+        auto const count = static_cast<double>(std::max(samples, 1));
         auto const mean = [&](unsigned const k, std::size_t const i) { return sums[k * n + i] / count; };
         auto const spread = [&](unsigned const k, std::size_t const i) {
             return std::sqrt(std::max(squares[k * n + i] / count - mean(k, i) * mean(k, i), 0.0));
         };
+        auto result = Measurement{.samples = samples};
         for (std::size_t i = 0; i < n; ++i) {
             result.position.push_back(mean(0, i));
-            result.torque.push_back(mean(1, i));
-            result.torqueSpread.push_back(spread(1, i));
-            result.effort.push_back(mean(2, i));
-            result.effortSpread.push_back(spread(2, i));
+            result.velocity.push_back(mean(1, i));
+            result.torque.push_back(mean(2, i));
+            result.torqueSpread.push_back(spread(2, i));
+            result.effort.push_back(mean(3, i));
+            result.effortSpread.push_back(spread(3, i));
         }
         return result;
     }
 
-    // Visits each pose of the set, approaching it from below and from above every joint, and records the
-    // torque that holds the arm there after it has come to rest.
+    // Sweeps every pose of the set slowly up and down through its approach, and records the torque that
+    // moves the arm through the pose each way. The mean of the two cancels the joints' Coulomb friction,
+    // which a static hold leaves anywhere within its band.
     int calibrate(std::string const &file, std::string const &set) {
         if (not options.confirmMotion) {
             return fail("calibrate moves the arm; add --confirm-motion", kUsage);
@@ -827,28 +851,32 @@ struct Probe {
         auto ok = succeeded(session.enable(), "enable");
         for (std::size_t n = 0; ok and n < plan->poses.size(); ++n) {
             auto const &pose = plan->poses[n];
+            ok = succeeded(arm->moveToJoints({.position = pose - plan->approach, .speed = options.speed}),
+                           "approach");
+            // Side -1 comes from below (the upward pass), side +1 from above.
             for (auto const side : {-1, 1}) {
-                ok = succeeded(arm->moveToJoints(
-                                   {.position = pose + side * plan->approach, .speed = options.speed}),
-                               "approach") and
-                     succeeded(arm->moveToJoints({.position = pose, .speed = options.speed}), "arrive");
                 if (not ok) {
                     break;
                 }
-                std::this_thread::sleep_for(kSettle);
-                auto const measured = measure(session, kRecord);
-                emit(JsonLine{"calibration"}
-                         .field("set", set)
-                         .field("index", static_cast<int>(n))
-                         .field("side", side)
-                         .field("target", std::span{pose.data(), static_cast<std::size_t>(pose.size())})
-                         .field("position", measured.position)
-                         .field("torque", measured.torque)
-                         .field("torque_spread", measured.torqueSpread)
-                         .field("effort", measured.effort)
-                         .field("effort_spread", measured.effortSpread)
-                         .field("max_speed", measured.maxSpeed)
-                         .field("samples", measured.samples));
+                auto const measured =
+                    sweep(session,
+                          arm->moveToJoints({.position = pose - side * plan->approach, .speed = kSweepSpeed}),
+                          pose, plan->approach);
+                ok = measured.has_value();
+                if (ok) {
+                    emit(JsonLine{"calibration"}
+                             .field("set", set)
+                             .field("index", static_cast<int>(n))
+                             .field("side", side)
+                             .field("target", std::span{pose.data(), static_cast<std::size_t>(pose.size())})
+                             .field("position", measured->position)
+                             .field("velocity", measured->velocity)
+                             .field("torque", measured->torque)
+                             .field("torque_spread", measured->torqueSpread)
+                             .field("effort", measured->effort)
+                             .field("effort_spread", measured->effortSpread)
+                             .field("samples", measured->samples));
+                }
             }
         }
         if (ok) {
