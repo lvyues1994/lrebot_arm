@@ -302,6 +302,32 @@ SafetySpec parseSafety(YAML::Node const &node, std::string const &path,
     return safety;
 }
 
+std::map<std::string, LinkInertial, std::less<>> parseDynamics(YAML::Node const &node,
+                                                               std::string const &path) {
+    auto inertials = std::map<std::string, LinkInertial, std::less<>>{};
+    if (not node) {
+        return inertials;
+    }
+    requireKeys(node, path, {"links"});
+    auto const links = required(node, path, "links");
+    auto const linksPath = childPath(path, "links");
+    if (not links.IsMap()) {
+        failAt(linksPath, "expected a mapping of link names");
+    }
+    for (auto const &entry : links) {
+        auto const name = entry.first.as<std::string>();
+        auto const linkPath = childPath(linksPath, name);
+        auto const link = YAML::Node{entry.second};
+        requireKeys(link, linkPath, {"mass", "com"});
+        auto const com = parseVector3(required(link, linkPath, "com"), childPath(linkPath, "com"));
+        if (not com.allFinite()) {
+            failAt(childPath(linkPath, "com"), "must be finite");
+        }
+        inertials.emplace(name, LinkInertial{.mass = positive(link, linkPath, "mass"), .centerOfMass = com});
+    }
+    return inertials;
+}
+
 ConfigNode section(YAML::Node const &root, char const *key, std::filesystem::path const &baseDirectory) {
     auto const node = root[key];
     return ConfigNode{.node = node ? YAML::Clone(node) : YAML::Node{}, .baseDirectory = baseDirectory};
@@ -309,7 +335,8 @@ ConfigNode section(YAML::Node const &root, char const *key, std::filesystem::pat
 
 RobotProfile parseProfileNode(YAML::Node const &root, std::filesystem::path const &baseDirectory) {
     requireKeys(root, "profile",
-                {"robot", "description", "control", "joints", "groups", "safety", "poses", "sim", "driver"});
+                {"robot", "description", "control", "joints", "groups", "safety", "poses", "dynamics", "sim",
+                 "driver"});
     auto profile = RobotProfile{};
     profile.name = requiredScalar<std::string>(root, "", "robot");
 
@@ -333,6 +360,7 @@ RobotProfile parseProfileNode(YAML::Node const &root, std::filesystem::path cons
     profile.groups = parseGroups(required(root, "", "groups"), "groups", profile.joints);
     profile.safety = parseSafety(required(root, "", "safety"), "safety", profile.joints);
     profile.poses = parsePoses(root["poses"], "poses", profile.joints);
+    profile.linkInertials = parseDynamics(root["dynamics"], "dynamics");
     profile.sim = section(root, "sim", baseDirectory);
     profile.driver = section(root, "driver", baseDirectory);
     return profile;

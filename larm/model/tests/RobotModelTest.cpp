@@ -1,6 +1,7 @@
 #include <larm/model/RobotModel.h>
 
 #include <gtest/gtest.h>
+#include <urdf_parser/urdf_parser.h>
 
 #include <cstdlib>
 #include <random>
@@ -92,6 +93,56 @@ TEST_F(RebotModel, GravityLoadsShoulderButNotVerticalBaseJoint) {
     auto const zero = zeroJointVector(profile.dof());
     dynamics->inverseDynamics(profile.safety.restPose, zero, zero, inverse);
     EXPECT_TRUE(inverse.isApprox(gravity, 1e-12));
+}
+
+// A link's inertial as the description has it.
+LinkInertial describedInertial(RobotProfile const &profile, std::string const &link) {
+    auto const tree = ::urdf::parseURDFFile(profile.urdf.string());
+    auto const &inertial = *tree->links_.at(link)->inertial;
+    auto const &com = inertial.origin.position;
+    return LinkInertial{.mass = inertial.mass, .centerOfMass = {com.x, com.y, com.z}};
+}
+
+TEST_F(RebotModel, LinkInertialsFromTheProfileReplaceTheDescriptions) {
+    auto const described = describedInertial(profile, "link3");
+    auto const q = profile.poses.at("ready");
+    auto const gravityOf = [&](RobotProfile const &withInertials) {
+        auto loaded = loadRobotModel(withInertials);
+        EXPECT_TRUE(loaded) << loaded.error().message;
+        auto gravity = JointVector{};
+        (*loaded)->makeDynamics()->gravity(q, gravity);
+        return gravity;
+    };
+    auto const nominal = gravityOf(profile);
+
+    auto same = profile;
+    same.linkInertials.emplace("link3", described);
+    EXPECT_TRUE(gravityOf(same).isApprox(nominal, 1e-12));
+
+    // Extra mass m at the link's center of mass adds m g dz/dq, z the height of that point.
+    constexpr double kExtra = 0.5;
+    auto heavier = profile;
+    heavier.linkInertials.emplace(
+        "link3", LinkInertial{.mass = described.mass + kExtra, .centerOfMass = described.centerOfMass});
+    auto const added = (gravityOf(heavier) - nominal).eval();
+    auto const link = *kinematics->findFrame("link3");
+    auto const height = [&](JointVector const &at) {
+        kinematics->update(at);
+        return (kinematics->framePose(link) * described.centerOfMass).z();
+    };
+    constexpr double kStep = 1e-6;
+    for (std::size_t i = 0; i < profile.dof(); ++i) {
+        auto up = q;
+        auto down = q;
+        up[idx(i)] += kStep;
+        down[idx(i)] -= kStep;
+        EXPECT_NEAR(added[idx(i)], kExtra * 9.81 * (height(up) - height(down)) / (2.0 * kStep), 1e-6) << i;
+    }
+    EXPECT_GT(std::abs(added[2]), 0.1);
+
+    auto unknown = profile;
+    unknown.linkInertials.emplace("no_such_link", LinkInertial{.mass = 1.0});
+    EXPECT_FALSE(loadRobotModel(unknown));
 }
 
 TEST_F(RebotModel, IkRecoversReachablePoses) {

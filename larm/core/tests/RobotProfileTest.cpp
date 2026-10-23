@@ -114,6 +114,27 @@ TEST(RobotProfile, ParsesNamedPosesWithinLimits) {
         << error.message;
 }
 
+TEST(RobotProfile, ParsesLinkInertials) {
+    auto const profile = parseRobotProfile(
+        replace(kValidProfile,
+                "sim:", "dynamics:\n  links:\n    link1: {mass: 0.8, com: [0.1, 0.0, -0.02]}\nsim:"),
+        "/base");
+    ASSERT_TRUE(profile) << profile.error().message;
+    ASSERT_EQ(profile->linkInertials.size(), 1u);
+    auto const &link = profile->linkInertials.at("link1");
+    EXPECT_DOUBLE_EQ(link.mass, 0.8);
+    EXPECT_TRUE(link.centerOfMass.isApprox(Eigen::Vector3d{0.1, 0.0, -0.02}));
+
+    EXPECT_NE(parseFailure(replace(kValidProfile, "sim:",
+                                   "dynamics:\n  links:\n    link1: {mass: 0.0, com: [0, 0, 0]}\nsim:"))
+                  .message.find("dynamics.links.link1.mass"),
+              std::string::npos);
+    EXPECT_NE(
+        parseFailure(replace(kValidProfile, "sim:", "dynamics:\n  links:\n    link1: {mass: 1.0}\nsim:"))
+            .message.find("com"),
+        std::string::npos);
+}
+
 TEST(RobotProfile, RejectsUnknownKey) {
     auto const error = parseFailure(
         replace(kValidProfile, "control: {period_us: 2000}", "control: {period_us: 2000, rate: 5}"));

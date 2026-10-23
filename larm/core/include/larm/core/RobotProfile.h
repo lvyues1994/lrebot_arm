@@ -71,6 +71,13 @@ struct SafetySpec {
     JointVector restPose;
 };
 
+// Replaces a URDF link's mass and center of mass (in the link frame); the rotational inertia scales
+// with the mass.
+struct LinkInertial {
+    double mass{};
+    Eigen::Vector3d centerOfMass = Eigen::Vector3d::Zero();
+};
+
 struct RobotProfile {
     std::string name;
     std::filesystem::path urdf;
@@ -83,6 +90,8 @@ struct RobotProfile {
     SafetySpec safety;
     // Named configurations within the limits, one value per joint; "ready" is where work starts.
     std::map<std::string, JointVector, std::less<>> poses;
+    // Identified inertial parameters by link name (dynamics.links), e.g. from a gravity calibration.
+    std::map<std::string, LinkInertial, std::less<>> linkInertials;
     ConfigNode sim;
     ConfigNode driver;
 

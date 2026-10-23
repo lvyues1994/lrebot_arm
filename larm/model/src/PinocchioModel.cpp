@@ -11,6 +11,7 @@
 #include <pinocchio/multibody/data.hpp>
 #include <pinocchio/multibody/model.hpp>
 #include <pinocchio/parsers/urdf.hpp>
+#include <urdf_parser/urdf_parser.h>
 
 #include <array>
 #include <exception>
@@ -143,10 +144,35 @@ struct PinocchioRobotModel final : RobotModel {
     std::shared_ptr<CollisionGeometry const> collisionGeometry;
 };
 
-Expected<pinocchio::Model> parseUrdf(std::filesystem::path const &urdf) {
+// The URDF with the profile's link inertials in place of the description's.
+Expected<pinocchio::Model> parseUrdf(RobotProfile const &profile) {
+    auto const &urdf = profile.urdf;
     try {
+        auto const tree = ::urdf::parseURDFFile(urdf.string());
+        if (not tree) {
+            return makeError(ErrorCode::InvalidConfig, "cannot load URDF " + urdf.string());
+        }
+        for (auto const &[name, inertial] : profile.linkInertials) {
+            auto const found = tree->links_.find(name);
+            if (found == tree->links_.end() or not found->second->inertial) {
+                return makeError(ErrorCode::InvalidConfig, "dynamics.links: '" + name +
+                                                               "' is not a link with an inertial in " +
+                                                               urdf.string());
+            }
+            auto &link = *found->second->inertial;
+            if (link.mass > 0.0) {
+                auto const scale = inertial.mass / link.mass;
+                for (auto *const moment :
+                     {&link.ixx, &link.ixy, &link.ixz, &link.iyy, &link.iyz, &link.izz}) {
+                    *moment *= scale;
+                }
+            }
+            link.mass = inertial.mass;
+            link.origin.position = ::urdf::Vector3{inertial.centerOfMass.x(), inertial.centerOfMass.y(),
+                                                   inertial.centerOfMass.z()};
+        }
         auto model = pinocchio::Model{};
-        pinocchio::urdf::buildModel(urdf.string(), model);
+        pinocchio::urdf::buildModel(tree, model);
         return model;
     } catch (std::exception const &exception) {
         return makeError(ErrorCode::InvalidConfig,
@@ -195,9 +221,8 @@ Expected<std::shared_ptr<ModelData const>> reduceToProfile(pinocchio::Model cons
 } // namespace
 
 Expected<std::unique_ptr<RobotModel>> loadRobotModel(RobotProfile const &profile) {
-    auto shared = parseUrdf(profile.urdf).and_then([&](pinocchio::Model const &full) {
-        return reduceToProfile(full, profile);
-    });
+    auto shared = parseUrdf(profile).and_then(
+        [&](pinocchio::Model const &full) { return reduceToProfile(full, profile); });
     if (not shared) {
         return tl::make_unexpected(shared.error());
     }
