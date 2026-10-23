@@ -1,0 +1,5 @@
+# A short gravity calibration for the probe's rehearsal test.
+approach: [0, 0.05, 0.05, 0.05, 0.05, 0.05]
+poses:
+  - [0.000, 0.700, 1.100, 0.000, 0.000, 0.000]
+  - [0.000, 0.900, 1.300, -0.400, 0.300, 0.500]

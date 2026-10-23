@@ -97,7 +97,23 @@ larm_driver_probe --profile $P --joints gripper grip 0.005 --effort 60 --confirm
 2. 只读：`monitor` 下手动推动每个关节，核对方向、零点，以及夹爪传动（7.353 mm/rad，方向待定）。
 3. 使能保持：机械臂在停放姿态，`hold 5 --confirm-power`；核对重力前馈下的反馈力矩、`missed_replies`、`missed_periods`，用 `canbusload` 实测总线负载。
 4. 单关节小幅运动：`jog` 逐个关节，从 0.05 rad 开始；在机械臂离开桌面的姿态下，比较反馈速度与位置差分。
-5. 慢速轨迹：`robot.launch.py` 加 Studio 或命令行，低速走完关节运动、停放、失能。
+5. 慢速轨迹：`robot.launch.py` 加 Studio 或命令行，低速走完关节运动、停放、失能。第一次大范围运动用 `pose ready 3 --speed 0.1 --confirm-motion`。
+
+### 重力标定
+
+只在无接触的姿态测量（停放姿态手腕压在大臂上，测得的力矩不能用），每个姿态从两侧逼近以消去摩擦，按连杆拟合质量与质心，结果写入配置的 `dynamics.links`：
+
+```bash
+source /opt/ros/jazzy/setup.bash
+python3 robots/rebot_b601/scripts/calibration_poses.py          # 生成 config/gravity_calibration_poses.yaml（已入库）
+python3 robots/rebot_b601/scripts/fit_gravity.py --synthetic    # 在扰动模型的合成数据上检查拟合
+J="--profile $P --joints joint1,joint2,joint3,joint4,joint5,joint6"
+larm_driver_probe $J calibrate robots/rebot_b601/config/gravity_calibration_poses.yaml poses --speed 0.15 --confirm-motion --output cal.jsonl
+larm_driver_probe $J calibrate robots/rebot_b601/config/gravity_calibration_poses.yaml validation --speed 0.15 --confirm-motion --output val.jsonl
+python3 robots/rebot_b601/scripts/fit_gravity.py cal.jsonl --validation val.jsonl --output dynamics.yaml
+```
+
+夹爪末端会到底座前后约 45 cm、左右约 20 cm 的范围，最低离桌面约 9 cm，先清空这片区域。
 
 ## Studio
 

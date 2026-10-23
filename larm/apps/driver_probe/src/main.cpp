@@ -12,6 +12,10 @@
 //   pose NAME SECONDS [--speed FRACTION] --confirm-motion
 //                                 enable, move the arm from rest to the profile pose NAME, hold it, move
 //                                 back, disable
+//   calibrate FILE [SET] [--speed FRACTION] --confirm-motion
+//                                 enable, visit the poses SET (default "poses") of a gravity calibration
+//                                 file, approaching each from both sides, and record the holding torque;
+//                                 move back, disable
 //   grip METERS [--effort NEWTONS] --confirm-motion
 //                                 enable, open (positive) or close the gripper by at most 0.01 m and
 //                                 back, disable; the effort limit is at most the profile's, the default
@@ -49,6 +53,9 @@ constexpr double kJogSpeed = 0.2;
 constexpr auto kSamplePeriod = std::chrono::milliseconds{20};
 // How long the disabled arm is still sampled before the statistics are taken.
 constexpr auto kObserveDisabled = std::chrono::milliseconds{500};
+// A calibration pose is recorded for kRecord after the arm has been still there for kSettle.
+constexpr auto kSettle = std::chrono::milliseconds{1000};
+constexpr auto kRecord = std::chrono::milliseconds{1000};
 
 enum ExitCode : int { kOk = 0, kFailed = 1, kUsage = 2, kRefused = 3 };
 
@@ -415,6 +422,21 @@ struct Probe {
         return away;
     }
 
+    // The joints of the arm group, in group order.
+    std::vector<std::size_t> armJoints() const {
+        auto const group = profile.findGroup("arm");
+        return group ? profile.groups[*group].joints : std::vector<std::size_t>{};
+    }
+
+    JointVector armRest() const {
+        auto const joints = armJoints();
+        auto rest = JointVector{static_cast<Eigen::Index>(joints.size())};
+        for (std::size_t i = 0; i < joints.size(); ++i) {
+            rest[larm::idx(i)] = profile.safety.restPose[larm::idx(joints[i])];
+        }
+        return rest;
+    }
+
     bool anyPowered(larm::control::RobotSnapshot const &snapshot) const {
         for (std::size_t i = 0; i < profile.dof(); ++i) {
             if (snapshot.state.actuators[i].enabled) {
@@ -500,10 +522,15 @@ struct Probe {
     // even after Ctrl+C; the hardware emergency stop is the way to interrupt it.
     int finish(Running &running, int code) const {
         auto &session = *running.session;
-        if (auto const latest = session.latest(); latest.power == larm::hal::DrivePower::Enabled and
-                                                  not awayFromRest(latest).empty() and
-                                                  not succeeded(session.park(), "park", Interruptible::No)) {
-            code = kFailed;
+        if (auto const latest = session.latest();
+            latest.power == larm::hal::DrivePower::Enabled and not awayFromRest(latest).empty()) {
+            // At the probe's speed: the arm may be far from rest, and the runtime parks at half speed.
+            auto *const arm = session.motion("arm");
+            auto const parked =
+                arm != nullptr ? succeeded(arm->moveToJoints({.position = armRest(), .speed = options.speed}),
+                                           "park", Interruptible::No)
+                               : succeeded(session.park(), "park", Interruptible::No);
+            code = parked ? code : kFailed;
         }
         // A park that ends short of its goal may still leave the arm close enough to disable.
         if (awayFromRest(session.latest()).empty() and
@@ -661,6 +688,175 @@ struct Probe {
         return finish(*running, ok ? kOk : kFailed);
     }
 
+    struct CalibrationPlan {
+        JointVector approach;
+        std::vector<JointVector> poses;
+    };
+
+    // The approach offsets and the poses named `set` of a calibration file, for the arm group.
+    larm::Expected<CalibrationPlan> loadCalibrationPlan(std::string const &file,
+                                                        std::string const &set) const {
+        auto const joints = armJoints();
+        auto const vector = [&](YAML::Node const &node,
+                                std::string const &what) -> larm::Expected<JointVector> {
+            if (not node.IsSequence() or node.size() != joints.size()) {
+                return larm::makeError(larm::ErrorCode::InvalidConfig,
+                                       file + ": " + what + " needs one value per arm joint");
+            }
+            auto values = JointVector{static_cast<Eigen::Index>(joints.size())};
+            for (std::size_t i = 0; i < joints.size(); ++i) {
+                values[larm::idx(i)] = node[i].as<double>();
+            }
+            return values;
+        };
+        try {
+            auto const root = YAML::LoadFile(file);
+            auto approach = vector(root["approach"], "approach");
+            if (not approach) {
+                return tl::make_unexpected(approach.error());
+            }
+            auto plan = CalibrationPlan{.approach = *approach, .poses = {}};
+            if (not root[set] or not root[set].IsSequence()) {
+                return larm::makeError(larm::ErrorCode::InvalidConfig,
+                                       file + ": no list of poses '" + set + "'");
+            }
+            for (std::size_t n = 0; n < root[set].size(); ++n) {
+                auto pose = vector(root[set][n], set + "[" + std::to_string(n) + "]");
+                if (not pose) {
+                    return tl::make_unexpected(pose.error());
+                }
+                for (std::size_t i = 0; i < joints.size(); ++i) {
+                    auto const &limits = profile.joints[joints[i]].limits;
+                    for (auto const side : {-1.0, 0.0, 1.0}) {
+                        auto const value = (*pose)[larm::idx(i)] + side * plan.approach[larm::idx(i)];
+                        if (not(value >= limits.lower and value <= limits.upper)) {
+                            return larm::makeError(larm::ErrorCode::InvalidConfig,
+                                                   file + ": " + set + "[" + std::to_string(n) +
+                                                       "] or its approach leaves the limits of " +
+                                                       profile.joints[joints[i]].name);
+                        }
+                    }
+                }
+                plan.poses.push_back(*pose);
+            }
+            return plan;
+        } catch (YAML::Exception const &error) {
+            return larm::makeError(larm::ErrorCode::InvalidConfig, file + ": " + error.what());
+        }
+    }
+
+    // Means and spreads over a still interval, per arm joint.
+    struct Measurement {
+        std::vector<double> position;
+        // The impedance torque commanded: effort + stiffness (q_cmd - q) + damping (v_cmd - v).
+        std::vector<double> torque;
+        std::vector<double> torqueSpread;
+        // What the motors report.
+        std::vector<double> effort;
+        std::vector<double> effortSpread;
+        double maxSpeed{};
+        int samples{};
+    };
+
+    Measurement measure(larm::runtime::RobotSession &session, larm::Duration const duration) const {
+        auto const joints = armJoints();
+        auto const n = joints.size();
+        auto sums = std::vector<double>(4 * n);
+        auto squares = std::vector<double>(4 * n);
+        auto result = Measurement{};
+        auto const until = std::chrono::steady_clock::now() + duration;
+        for (auto tick = std::chrono::steady_clock::now(); tick < until and not stop->stop_requested();
+             tick += kSamplePeriod) {
+            std::this_thread::sleep_until(tick);
+            auto const snapshot = session.latest();
+            auto const &state = snapshot.state.joints;
+            auto const &command = snapshot.command;
+            for (std::size_t i = 0; i < n; ++i) {
+                auto const j = larm::idx(joints[i]);
+                auto const torque = command.effort[j] +
+                                    command.stiffness[j] * (command.position[j] - state.position[j]) +
+                                    command.damping[j] * (command.velocity[j] - state.velocity[j]);
+                for (auto const &[k, value] : {std::pair{0U, state.position[j]}, std::pair{1U, torque},
+                                               std::pair{2U, state.effort[j]}}) {
+                    sums[k * n + i] += value;
+                    squares[k * n + i] += value * value;
+                }
+                result.maxSpeed = std::max(result.maxSpeed, std::abs(state.velocity[j]));
+            }
+            ++result.samples;
+        }
+        auto const count = static_cast<double>(std::max(result.samples, 1));
+        auto const mean = [&](unsigned const k, std::size_t const i) { return sums[k * n + i] / count; };
+        auto const spread = [&](unsigned const k, std::size_t const i) {
+            return std::sqrt(std::max(squares[k * n + i] / count - mean(k, i) * mean(k, i), 0.0));
+        };
+        for (std::size_t i = 0; i < n; ++i) {
+            result.position.push_back(mean(0, i));
+            result.torque.push_back(mean(1, i));
+            result.torqueSpread.push_back(spread(1, i));
+            result.effort.push_back(mean(2, i));
+            result.effortSpread.push_back(spread(2, i));
+        }
+        return result;
+    }
+
+    // Visits each pose of the set, approaching it from below and from above every joint, and records the
+    // torque that holds the arm there after it has come to rest.
+    int calibrate(std::string const &file, std::string const &set) {
+        if (not options.confirmMotion) {
+            return fail("calibrate moves the arm; add --confirm-motion", kUsage);
+        }
+        if (armJoints().empty()) {
+            return fail("the profile has no arm group", kUsage);
+        }
+        auto const plan = loadCalibrationPlan(file, set);
+        if (not plan) {
+            return fail(plan.error().message, kUsage);
+        }
+
+        auto running = startRuntime();
+        if (not running) {
+            return fail(running.error().message);
+        }
+        if (auto const refused = checkStart(*running->session); refused != kOk) {
+            return refused;
+        }
+        auto &session = *running->session;
+        auto const sampling = sampler(session);
+        auto *const arm = session.motion("arm");
+        auto ok = succeeded(session.enable(), "enable");
+        for (std::size_t n = 0; ok and n < plan->poses.size(); ++n) {
+            auto const &pose = plan->poses[n];
+            for (auto const side : {-1, 1}) {
+                ok = succeeded(arm->moveToJoints(
+                                   {.position = pose + side * plan->approach, .speed = options.speed}),
+                               "approach") and
+                     succeeded(arm->moveToJoints({.position = pose, .speed = options.speed}), "arrive");
+                if (not ok) {
+                    break;
+                }
+                std::this_thread::sleep_for(kSettle);
+                auto const measured = measure(session, kRecord);
+                emit(JsonLine{"calibration"}
+                         .field("set", set)
+                         .field("index", static_cast<int>(n))
+                         .field("side", side)
+                         .field("target", std::span{pose.data(), static_cast<std::size_t>(pose.size())})
+                         .field("position", measured.position)
+                         .field("torque", measured.torque)
+                         .field("torque_spread", measured.torqueSpread)
+                         .field("effort", measured.effort)
+                         .field("effort_spread", measured.effortSpread)
+                         .field("max_speed", measured.maxSpeed)
+                         .field("samples", measured.samples));
+            }
+        }
+        if (ok) {
+            ok = succeeded(arm->moveToJoints({.position = armRest(), .speed = options.speed}), "move back");
+        }
+        return finish(*running, ok ? kOk : kFailed);
+    }
+
     // Opens (positive) or closes the gripper by `step` from where it is, and back.
     int grip(double const step) {
         if (not options.confirmMotion) {
@@ -734,6 +930,7 @@ void usage() {
            "  scan\n  monitor SECONDS\n  hold SECONDS --confirm-power\n"
            "  jog JOINT RADIANS [--speed FRACTION<=0.2] --confirm-motion\n"
            "  pose NAME SECONDS [--speed FRACTION<=0.2] --confirm-motion\n"
+           "  calibrate FILE [SET] [--speed FRACTION<=0.2] --confirm-motion\n"
            "  grip METERS [--effort NEWTONS] --confirm-motion\n";
 }
 
@@ -794,6 +991,9 @@ int main(int argc, char **argv) {
         }
         if (options->command == "jog" and arguments.size() == 2) {
             return probe.jog(arguments[0], std::stod(arguments[1]));
+        }
+        if (options->command == "calibrate" and (arguments.size() == 1 or arguments.size() == 2)) {
+            return probe.calibrate(arguments[0], arguments.size() == 2 ? arguments[1] : "poses");
         }
         if (options->command == "pose" and arguments.size() == 2) {
             return probe.pose(arguments[0], std::stod(arguments[1]));

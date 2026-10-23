@@ -14,12 +14,16 @@ if(LARM_BUILD_TESTS)
     add_test(NAME larm_driver_probe_joints_scan COMMAND ${probe} --joints joint1,joint2 scan)
     add_test(NAME larm_driver_probe_grip COMMAND ${probe} --joints gripper grip 0.005 --confirm-motion)
     add_test(NAME larm_driver_probe_pose COMMAND ${probe} pose ready 1 --confirm-motion)
+    add_test(NAME larm_driver_probe_calibrate
+             COMMAND ${probe} calibrate ${CMAKE_CURRENT_SOURCE_DIR}/tests/calibration_two_poses.yaml --confirm-motion)
+    set_tests_properties(larm_driver_probe_calibrate PROPERTIES PASS_REGULAR_EXPRESSION
+                         "\"index\":1,\"side\":1,.*\"event\":\"step\",\"name\":\"move back\",\"outcome\":\"succeeded\"")
     add_test(NAME larm_driver_probe_needs_confirmation COMMAND ${probe} hold 1)
     set_tests_properties(larm_driver_probe_needs_confirmation PROPERTIES WILL_FAIL TRUE)
     set_tests_properties(larm_driver_probe_joints_scan PROPERTIES PASS_REGULAR_EXPRESSION
                          "\"answered\":2,\"actuators\":2,.*\"ready\":true")
     set_tests_properties(larm_driver_probe_scan larm_driver_probe_hold larm_driver_probe_jog
                          larm_driver_probe_joints_jog larm_driver_probe_joints_scan larm_driver_probe_grip
-                         larm_driver_probe_pose
+                         larm_driver_probe_pose larm_driver_probe_calibrate
                          PROPERTIES TIMEOUT 60)
 endif()
