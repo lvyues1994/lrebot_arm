@@ -748,7 +748,8 @@ struct Probe {
     // Means and spreads over a still interval, per arm joint.
     struct Measurement {
         std::vector<double> position;
-        // The impedance torque commanded: effort + stiffness (q_cmd - q) + damping (v_cmd - v).
+        // The static impedance torque commanded: effort + stiffness (q_cmd - q). At rest the damping term
+        // averages to zero and only adds the motors' velocity noise (about 0.07 rad/s).
         std::vector<double> torque;
         std::vector<double> torqueSpread;
         // What the motors report.
@@ -773,9 +774,8 @@ struct Probe {
             auto const &command = snapshot.command;
             for (std::size_t i = 0; i < n; ++i) {
                 auto const j = larm::idx(joints[i]);
-                auto const torque = command.effort[j] +
-                                    command.stiffness[j] * (command.position[j] - state.position[j]) +
-                                    command.damping[j] * (command.velocity[j] - state.velocity[j]);
+                auto const torque =
+                    command.effort[j] + command.stiffness[j] * (command.position[j] - state.position[j]);
                 for (auto const &[k, value] : {std::pair{0U, state.position[j]}, std::pair{1U, torque},
                                                std::pair{2U, state.effort[j]}}) {
                     sums[k * n + i] += value;
