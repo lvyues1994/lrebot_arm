@@ -93,10 +93,15 @@ TEST_F(RebotSimulation, ToolPoseMatchesPinocchio) {
     }
 }
 
+// The MJCF keeps the CAD inertia; the profile's calibrated link inertials do not apply to it.
 TEST_F(RebotSimulation, GravityMatchesPinocchio) {
     auto sim = simulation();
     ASSERT_NE(sim, nullptr);
-    auto dynamics = robotModel->makeDynamics();
+    auto cad = profile;
+    cad.linkInertials.clear();
+    auto const cadModel = model::loadRobotModel(cad);
+    ASSERT_TRUE(cadModel) << cadModel.error().message;
+    auto dynamics = (*cadModel)->makeDynamics();
     auto const q = clearancePose();
     sim->reset(q);
     auto gravity = JointVector{};

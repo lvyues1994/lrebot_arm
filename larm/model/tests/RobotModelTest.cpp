@@ -113,15 +113,18 @@ TEST_F(RebotModel, LinkInertialsFromTheProfileReplaceTheDescriptions) {
         (*loaded)->makeDynamics()->gravity(q, gravity);
         return gravity;
     };
-    auto const nominal = gravityOf(profile);
+    auto cad = profile;
+    cad.linkInertials.clear();
+    auto const nominal = gravityOf(cad);
 
-    auto same = profile;
+    auto same = cad;
     same.linkInertials.emplace("link3", described);
     EXPECT_TRUE(gravityOf(same).isApprox(nominal, 1e-12));
+    EXPECT_FALSE(gravityOf(profile).isApprox(nominal, 1e-6));
 
     // Extra mass m at the link's center of mass adds m g dz/dq, z the height of that point.
     constexpr double kExtra = 0.5;
-    auto heavier = profile;
+    auto heavier = cad;
     heavier.linkInertials.emplace(
         "link3", LinkInertial{.mass = described.mass + kExtra, .centerOfMass = described.centerOfMass});
     auto const added = (gravityOf(heavier) - nominal).eval();
@@ -140,7 +143,7 @@ TEST_F(RebotModel, LinkInertialsFromTheProfileReplaceTheDescriptions) {
     }
     EXPECT_GT(std::abs(added[2]), 0.1);
 
-    auto unknown = profile;
+    auto unknown = cad;
     unknown.linkInertials.emplace("no_such_link", LinkInertial{.mass = 1.0});
     EXPECT_FALSE(loadRobotModel(unknown));
 }
